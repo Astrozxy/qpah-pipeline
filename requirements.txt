@@ -1,0 +1,8 @@
+astropy>=6
+reproject>=0.13
+numpy
+scipy
+h5py
+torch>=2
+scikit-learn
+matplotlib
