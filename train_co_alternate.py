@@ -152,6 +152,9 @@ def main():
     log('qPAH loss: %s (err-floor=%.2f, huber-delta=%.2f)'
         % ('heteroscedastic Pseudo-Huber' if not args.no_err_weight
            else 'equal-weight Pseudo-Huber', args.err_floor, args.huber_delta))
+    log('sigma_eff: med=%.3f p16=%.3f p84=%.3f | qpah_err: med=%.3f p84=%.3f'
+        % (np.median(sig_eval), np.percentile(sig_eval, 16), np.percentile(sig_eval, 84),
+           np.median(qpah_err), np.percentile(qpah_err, 84)))
 
     json.dump({'features': FEATURES, 'mean': mean.flatten().tolist(),
                'std': std.flatten().tolist(), 'transform': None},
@@ -223,11 +226,16 @@ def main():
     se_tr = se_t[train_idx]
     opt_co = optim.Adam([co_true], lr=args.co_lr)
 
-    def co_loss_full():
+    def co_loss_parts():
+        """返回 (qPAH 数据项, CO 先验项)；先验项未乘 0.5·λ。"""
         Xb = Xtr.clone()
         Xb[:, 3] = (co_true - mean[0][3]) / std[0][3]
         q = torch.mean(phuber((model(Xb) - ytr) / se_tr, args.huber_delta))
         pr = torch.mean(((co_true - co_meas_tr) / co_sig_tr) ** 2)
+        return q, pr
+
+    def co_loss_full():
+        q, pr = co_loss_parts()
         return q + 0.5 * args.prior_lambda * pr
 
     log('Stage-2a: freeze model, update CO_true (all pixels) %d steps...'
@@ -241,8 +249,12 @@ def main():
         with torch.no_grad():
             co_true.data.clamp_(min=0.0)
         if (k + 1) % 10 == 0:
-            log('  S2a step %3d loss=%.4f  CO_true med=%.3f'
-                % (k + 1, loss.item(), co_true.detach().median().item()))
+            with torch.no_grad():
+                q_now, pr_now = co_loss_parts()
+            log('  S2a step %3d loss=%.4f (data=%.4f prior=%.4f)  CO_true med=%.3f'
+                % (k + 1, loss.item(), q_now.item(),
+                   0.5 * args.prior_lambda * pr_now.item(),
+                   co_true.detach().median().item()))
 
     # ============ Stage-2b: 联合微调（模型 + CO_true 小步幅） ============
     log('Stage-2b: joint fine-tune (%d epochs, model_lr=%.0e co_lr=%.0e)...'
@@ -271,12 +283,29 @@ def main():
             tot += q.item() * len(ib)
         if (ep + 1) % 20 == 0 or ep == args.joint_epochs - 1:
             vl = val_loss(model)
-            log('  S2b ep %3d tr=%.4f val(measCO)=%.4f best=%.4f'
-                % (ep + 1, tot / n_tr, vl, best))
+            with torch.no_grad():
+                pr_ep = torch.mean(((co_true - co_meas_tr) / co_sig_tr) ** 2).item()
+            log('  S2b ep %3d tr=%.4f (CO prior=%.4f) val(measCO)=%.4f best=%.4f'
+                % (ep + 1, tot / n_tr, 0.5 * args.prior_lambda * pr_ep, vl, best))
             if vl < best:
                 best = vl
                 best_ep = ep + 1
                 torch.save(model.state_dict(), os.path.join(outdir, 'model.pth'))
+
+    # ============ CO_true 诊断（供 forward model 分析） ============
+    with torch.no_grad():
+        ct = co_true.detach().cpu().numpy().astype(np.float64)
+    cm = co_meas_tr.detach().cpu().numpy().astype(np.float64)
+    cs = co_sig_tr.detach().cpu().numpy().astype(np.float64)
+    co_ratio = np.where(cm > 1e-9, ct / np.maximum(cm, 1e-9), np.nan)
+    co_pull_all = (ct - cm) / cs
+    log('CO_true/CO_meas (train): med=%.3f p16=%.3f p84=%.3f | (CO_true-CO_meas)/sigma: med=%.2f std=%.2f'
+        % (np.nanmedian(co_ratio), np.nanpercentile(co_ratio, 16),
+           np.nanpercentile(co_ratio, 84), np.median(co_pull_all), np.std(co_pull_all)))
+    np.savez(os.path.join(outdir, 'co_true_train.npz'),
+             co_true=ct, co_meas=cm, co_sigma=cs, co_ratio=co_ratio,
+             co_pull=co_pull_all, qpah=ytr.detach().cpu().numpy(),
+             qpah_err=sig_eval[train_idx], co_det=det[train_idx])
 
     # ============ 测试（测量 CO） ============
     # 注意：Stage-2b 结束时内存里的模型是最后一轮（往往已过拟合），
@@ -313,6 +342,12 @@ def main():
                    prior_lambda=args.prior_lambda, mse=mse, rmsle=rmsle,
                    chi2_red=chi2_red, pull_med=pull_med, pull_std=pull_std,
                    frac_pred_neg=frac_neg, final_eval_model=final_note.strip(),
+                   sigma_eff_med=float(np.median(sig_eval)),
+                   co_true_ratio_med=float(np.nanmedian(co_ratio)),
+                   co_true_ratio_p16=float(np.nanpercentile(co_ratio, 16)),
+                   co_true_ratio_p84=float(np.nanpercentile(co_ratio, 84)),
+                   co_true_pull_med=float(np.median(co_pull_all)),
+                   co_true_pull_std=float(np.std(co_pull_all)),
                    model_file=os.path.join(outdir, 'model.pth')),
               open(os.path.join(outdir, 'train.json'), 'w'), indent=1)
     log('ALL DONE ->', outdir)
