@@ -72,6 +72,18 @@ def phuber(r, delta=10.0):
     return delta ** 2 * (torch.sqrt(1 + (r / delta) ** 2) - 1)
 
 
+def model_norm(model):
+    """模型全部参数的 L2 范数（用于观察参数是否"乱飘"）。"""
+    with torch.no_grad():
+        return float(torch.sqrt(sum((p ** 2).sum() for p in model.parameters())))
+
+
+def layer_norms(model):
+    """逐层参数范数（诊断用）。"""
+    with torch.no_grad():
+        return {n: float(p.norm()) for n, p in model.named_parameters()}
+
+
 def load_h5(h5path):
     keys = ['ra', 'dec', 'qpah', 'qpah_err', 'sfr', 'CO', 'H1', 'H1_ew',
             'dust_density', 'CO_sigma', 'CO_det']
@@ -122,6 +134,9 @@ def main():
                     help='Pseudo-Huber δ（作用于残差/σ_eff 之后）')
     ap.add_argument('--no-err-weight', action='store_true',
                     help='回退等权 Pseudo-Huber（不除以 qpah_err）')
+    ap.add_argument('--weight-decay', type=float, default=1e-4,
+                    help='MLP 权重 L2 正则（Adam weight_decay）。只作用于模型参数，'
+                         '不作用于 CO_true（后者的正则来自 CO 先验项）；设 0 关闭')
     args = ap.parse_args()
     tag = args.tag or ('coalt_' + args.selection)
     outdir = os.path.join(RESULTS, tag)
@@ -186,7 +201,8 @@ def main():
     # ============ Stage-1: CO>3σ 子集训练 ============
     log('Stage-1: train on CO/σ>%.0f pixels (n=%d) ...' % (args.snr_thresh, det.sum()))
     model = MLPRegressor().to(device)
-    opt1 = optim.Adam(model.parameters(), lr=0.01)
+    log('  weight_decay=%.1e | ||W|| init=%.3f' % (args.weight_decay, model_norm(model)))
+    opt1 = optim.Adam(model.parameters(), lr=0.01, weight_decay=args.weight_decay)
     sch1 = optim.lr_scheduler.StepLR(opt1, step_size=100, gamma=0.8)
     idx1 = np.where(det)[0]
     yy1 = y[idx1]
@@ -214,7 +230,7 @@ def main():
             log('  S1 ep %4d tr=%.4f' % (ep + 1, tot / len(idx1)))
     torch.save(model.state_dict(), os.path.join(outdir, 'model_stage1.pth'))
     v1 = val_loss(model)
-    log('Stage-1 val (meas CO): %.4f' % v1)
+    log('Stage-1 val (meas CO): %.4f  ||W||=%.3f' % (v1, model_norm(model)))
 
     # ============ Stage-2a: 冻结模型，只更新 CO_true（全像素，带先验） ============
     # CO_true 只对训练像素优化（val/test 一律用测量 CO，避免泄漏）
@@ -259,8 +275,9 @@ def main():
     # ============ Stage-2b: 联合微调（模型 + CO_true 小步幅） ============
     log('Stage-2b: joint fine-tune (%d epochs, model_lr=%.0e co_lr=%.0e)...'
         % (args.joint_epochs, args.joint_model_lr, args.joint_co_lr))
-    params = [{'params': model.parameters(), 'lr': args.joint_model_lr},
-              {'params': [co_true], 'lr': args.joint_co_lr}]
+    params = [{'params': model.parameters(), 'lr': args.joint_model_lr,
+               'weight_decay': args.weight_decay},
+              {'params': [co_true], 'lr': args.joint_co_lr, 'weight_decay': 0.0}]
     opt_j = optim.Adam(params)
     best = float('inf')
     best_ep = -1
@@ -317,6 +334,10 @@ def main():
                                          weights_only=True))
         final_note = ' (reloaded best model @ep%d)' % best_ep
     log('final eval uses%s' % final_note)
+    log('MLP ||W|| (final) = %.3f | per-layer: %s'
+        % (model_norm(model),
+           ', '.join('%s=%.2f' % (k.replace('.weight', ''), v)
+                     for k, v in layer_norms(model).items() if k.endswith('.weight'))))
     model.eval()
     with torch.no_grad():
         pt = model(build_X(co_m, test_idx)).cpu().numpy()
@@ -342,6 +363,7 @@ def main():
                    prior_lambda=args.prior_lambda, mse=mse, rmsle=rmsle,
                    chi2_red=chi2_red, pull_med=pull_med, pull_std=pull_std,
                    frac_pred_neg=frac_neg, final_eval_model=final_note.strip(),
+                   weight_decay=args.weight_decay,
                    sigma_eff_med=float(np.median(sig_eval)),
                    co_true_ratio_med=float(np.nanmedian(co_ratio)),
                    co_true_ratio_p16=float(np.nanpercentile(co_ratio, 16)),
