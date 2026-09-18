@@ -140,8 +140,10 @@ def main():
     Xn = (Xraw - mean) / std
     y = ds['qpah'].astype(np.float32)
     qpah_err = ds['qpah_err'].astype(np.float32)
-    sig_eff = (np.sqrt(qpah_err ** 2 + args.err_floor ** 2)
-               if not args.no_err_weight else np.ones_like(qpah_err))
+    # sig_eval：评估用的 σ（始终基于 qpah_err，保证两版可比）
+    # sig_eff ：loss 用的 σ（--no-err-weight 时退化为等权 =1）
+    sig_eval = np.sqrt(qpah_err ** 2 + args.err_floor ** 2)
+    sig_eff = sig_eval if not args.no_err_weight else np.ones_like(qpah_err)
     co_meas = ds['CO'].astype(np.float32)
     co_sig = np.maximum(ds['CO_sigma'].astype(np.float32), 1e-6)
     det = (co_meas / co_sig) > args.snr_thresh
@@ -277,11 +279,20 @@ def main():
                 torch.save(model.state_dict(), os.path.join(outdir, 'model.pth'))
 
     # ============ 测试（测量 CO） ============
+    # 注意：Stage-2b 结束时内存里的模型是最后一轮（往往已过拟合），
+    # 必须重新加载 val 最优的 model.pth 再做最终评估，否则指标严重失真。
+    best_path = os.path.join(outdir, 'model.pth')
+    final_note = ' (current model)'
+    if best_ep > 0 and os.path.exists(best_path):
+        model.load_state_dict(torch.load(best_path, map_location=device,
+                                         weights_only=True))
+        final_note = ' (reloaded best model @ep%d)' % best_ep
+    log('final eval uses%s' % final_note)
     model.eval()
     with torch.no_grad():
         pt = model(build_X(co_m, test_idx)).cpu().numpy()
     ytst = y[test_idx]
-    stst = sig_eff[test_idx]
+    stst = sig_eval[test_idx]
     mse = float(np.mean((pt - ytst) ** 2))
     rmsle = float(np.sqrt(np.mean((np.log(np.clip(pt, 1e-12, None)) -
                                    np.log(ytst)) ** 2)))
@@ -289,6 +300,7 @@ def main():
     chi2_red = float(np.mean(pull ** 2))
     pull_med = float(np.median(pull))
     pull_std = float(np.std(pull))
+    frac_neg = float(np.mean(pt < 0))
     log('Stage-2 spatial test (meas CO): MSE=%.6f RMSLE=%.6f | chi2_red=%.3f pull med/std=%.3f/%.3f'
         % (mse, rmsle, chi2_red, pull_med, pull_std))
     json.dump(dict(selection=args.selection, tag=tag, h5=h5path, n=ds['n_total'],
@@ -300,6 +312,7 @@ def main():
                    co_only_steps=args.co_only_steps, joint_epochs=args.joint_epochs,
                    prior_lambda=args.prior_lambda, mse=mse, rmsle=rmsle,
                    chi2_red=chi2_red, pull_med=pull_med, pull_std=pull_std,
+                   frac_pred_neg=frac_neg, final_eval_model=final_note.strip(),
                    model_file=os.path.join(outdir, 'model.pth')),
               open(os.path.join(outdir, 'train.json'), 'w'), indent=1)
     log('ALL DONE ->', outdir)
