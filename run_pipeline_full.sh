@@ -10,7 +10,9 @@
 #   4 train_co_alternate full (Stage-1 -> 2a -> 2b; 输出 results/coalt_full/)
 #   5 predict_grid coalt_full (读 results/coalt_full/model.pth 预测全网格)
 #   6 interpret coalt_full    (解释图，基于交替优化模型)
-#   7 plot_galaxy_map coalt_full (全样本 RA-Dec obs/pred/resid 三面板)
+#   7 plot_galaxy_map coalt_full (全样本 RA-Dec obs/pred/chi 三面板)
+#   8 render_pred_maps coalt_full (全网格 pred + chi PNG)
+#   9 plot_co_update_map coalt_full (CO 更新前/后对比图)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +28,7 @@ echo "开始时间  : $(date '+%F %T')"
 # 清理旧数据集（必须重建，因为 CO 产物已改变）
 rm -f data/M31_1d_array_full.h5 data/M31_1d_array_agb.h5
 
-step(){ echo; echo "===== [$1/7] $2 ====="; }
+step(){ echo; echo "===== [$1/9] $2 ====="; }
 
 step 1 "make_co_maps.py (cube -> I_CO + sigma_I)"
 "$PYTHON" "$HERE/make_co_maps.py" 2>&1 | tee logs/make_co_maps.log
@@ -46,13 +48,19 @@ step 5 "predict_grid.py --tag coalt_full"
 step 6 "interpret.py --selection full --tag coalt_full"
 "$PYTHON" "$HERE/interpret.py" --selection full --tag coalt_full 2>&1 | tee logs/interpret_coalt_full.log
 
-step 7 "plot_galaxy_map.py --tag coalt_full (RA-Dec obs/pred/resid 三面板)"
+step 7 "plot_galaxy_map.py --tag coalt_full (RA-Dec obs/pred/chi 三面板)"
 "$PYTHON" "$HERE/plot_galaxy_map.py" --tag coalt_full 2>&1 | tee logs/plot_galaxy_map_coalt_full.log
+
+step 8 "render_pred_maps.py --tag coalt_full (全网格 pred + chi PNG)"
+"$PYTHON" "$HERE/render_pred_maps.py" --tag coalt_full 2>&1 | tee logs/render_pred_maps_coalt_full.log
+
+step 9 "plot_co_update_map.py --tag coalt_full (CO 更新前/后对比图)"
+"$PYTHON" "$HERE/plot_co_update_map.py" --tag coalt_full 2>&1 | tee logs/plot_co_update_map_coalt_full.log
 
 echo
 echo "全部完成: $(date '+%F %T')"
 echo "关键产物:"
 echo "  data/M31_1d_array_full.h5 (含 CO_sigma/CO_det)"
-echo "  results/coalt_full/{model_stage1.pth,model.pth,scale.json,train.json,fig_*(含 fig_galaxy_map)}"
-echo "  data/qpah_pred_map_coalt_full.fits (+ resid)"
+echo "  results/coalt_full/{model_stage1.pth,model.pth,scale.json,train.json,co_true_train.npz,fig_*}"
+echo "  data/qpah_pred_map_coalt_full.fits (+ resid, + chi map)"
 echo "  logs/*.log"

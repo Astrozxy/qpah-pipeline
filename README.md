@@ -45,10 +45,25 @@ python qpah_pipeline/interpret.py --selection full --tag coalt_full
 ```
 results/coalt_full/
 ├── model_stage1.pth / model.pth / scale.json / train.json
-├── fig_obs_pred_resid.png / fig_parity.png   (train_co_alternate.py)
-└── fig_interpret_*.png                       (interpret.py)
-data/qpah_pred_map_coalt_full.fits (+ resid)
+├── co_true_train.npz                        (CO_true 诊断 + Fisher/sigma_post)
+├── fig_galaxy_map.png/.pdf                  (obs / pred / chi 三面板)
+├── fig_co_update_map.png/.pdf               (CO 更新前/后 + dCO + 显著性)
+├── fig_pred_map_<tag>.png                   (全网格预测)
+├── fig_chi_map_<tag>.png                    (全网格 chi)
+└── fig_interpret_*.png                      (interpret.py)
+data/qpah_pred_map_<tag>.fits / qpah_pred_resid_map_<tag>.fits / qpah_chi_map_<tag>.fits
 ```
+
+**评估口径（重要）**：qPAH 观测误差是**逐像素异方差**的，因此本流程**不计算 MSE/RMSLE**。
+拟合质量用 `chi2_red = mean(pull^2)`（理想值 1）与 pull 分布（理想 med 0 / std 1）判断，
+其中 `pull = (pred - obs)/sigma_eff`，`sigma_eff = sqrt(qpah_err^2 + err_floor^2)`。
+同理，所有残差图都画成相对误差 `chi`，而非绝对残差。
+
+**CO 交替更新**：Stage-1 只用 CO/σ>3 像素训练（假设观测=真值）→ Stage-2a 冻结模型、
+以 CO 观测为先验反推**全部训练扇区像素**的 `c_true` → Stage-2b 用 `c_true` 训练并与模型联合微调。
+测试扇区不做反推（避免用 qPAH 标签泄漏），预测时用观测值输入。
+`co_true_train.npz` 给出每像素的 `c_true`、`sigma_post/sigma_CO`（qPAH 对 CO 的约束强度，
+=1 表示无额外约束）与 `g = d(qPAH)/d(CO)`。
 
 ## 附录分析（不进主流程）
 
