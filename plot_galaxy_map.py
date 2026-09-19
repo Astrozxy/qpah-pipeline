@@ -35,11 +35,13 @@ random_state = 0
 
 
 class MLPRegressor(nn.Module):
-    def __init__(self, input_dim=5, hidden=(32, 32)):
+    def __init__(self, input_dim=5, hidden=(32, 32), dropout=0.0):
         super().__init__()
         layers, in_dim = [], input_dim
         for h in hidden:
             layers += [nn.Linear(in_dim, h), nn.Tanh()]
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
             in_dim = h
         layers.append(nn.Linear(in_dim, 1))
         self.net = nn.Sequential(*layers)
