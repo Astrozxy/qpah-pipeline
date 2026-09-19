@@ -15,12 +15,14 @@
     "  Stage-2b: 用更新后的 CO_true 训练，同时放开模型参数，联合微调",
     "  约定：测试扇区不做反推（否则等于用 qPAH 标签反推输入 = 泄漏），预测一律用观测值输入。",
     "",
-    "【高 CO 端失真】优先看这几个旋钮：",
-    "  1) model.hidden            —— 容量（现在只有 1281 参数）",
-    "  2) optim.weight_decay      —— 压制模型响应的直接元凶之一（g 会变小）",
-    "  3) loss.huber_delta        —— 太小会压制大残差（高值端欠拟合）",
-    "  4) stage1.rebalance_by_qpah / weight_cap_factor —— 高低值的采样平衡",
-    "  5) stage2.prior_lambda     —— 只影响 CO_true，不影响 qPAH 拟合本身"
+    "【高 CO 端失真】优先看这几个旋钮（注意：实测把模型加宽反而过拟合，见 model._comment）：",
+    "  1) optim.weight_decay  —— 压制模型对输入响应的直接元凶之一（g 会变小）",
+    "  2) loss.huber_delta    —— 太小会压制大残差（高值端欠拟合）",
+    "  3) loss.err_floor      —— 决定低误差像素在 loss 里的权重",
+    "  4) stage1.rebalance_by_qpah / weight_cap_factor —— 高低 qPAH 的采样平衡",
+    "  5) stage1.epochs       —— 现在 300 轮时 Stage-1 训练 loss 仍在下降",
+    "  6) stage2.joint_epochs —— best_epoch 常出现在 20-40 轮，200 轮明显过拟合",
+    "  （model.hidden 已实测加宽 -> 过拟合，建议保持 [32,32]）"
   ],
 
   "data": {
@@ -50,10 +52,10 @@
   },
 
   "model": {
-    "_comment": "MLP 结构。当前默认 5-32-32-1 只有约 1281 个参数，容量偏小",
+    "_comment": "MLP 结构。默认 5-32-32-1 只有约 1281 个参数。实测把 hidden 加到 [64,64]（4609 参数）会明显过拟合：chi2_red 1.044->1.395、pull_std 1.021->1.179、Stage-1 验证 loss 1.071->1.418、Stage-2 best val 0.748->0.877，因此保持 [32,32]；若要增强模型对 CO 的响应（g=dqPAH/dCO 当前偏小），优先考虑特征工程或调 err_floor/huber_delta/先验，而不是加宽网络",
     "_knobs": {
-      "hidden": "各隐层宽度列表，例 [64, 64] / [128, 64, 32] / [256, 128]",
-      "dropout": "隐层 dropout 概率（0 = 关闭）"
+      "hidden": "各隐层宽度列表。例 [64, 64] —— 注意实测会过拟合，慎用",
+      "dropout": "隐层 dropout 概率（0 = 关闭）。32-32 下可试 0.02-0.1 作轻度正则"
     },
     "hidden": [32, 32],
     "dropout": 0.0
