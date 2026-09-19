@@ -181,6 +181,11 @@ def main():
                     help='MLP 隐层宽度，例：--hidden 64 64 32')
     ap.add_argument('--dropout', type=float,
                     default=cfg_get(cfg, 'model', 'dropout', default=0.0))
+    ap.add_argument('--rebalance-by', choices=['none', 'qpah', 'co', 'joint'],
+                    default=cfg_get(cfg, 'stage1', 'rebalance_by', default='qpah'),
+                    help='Stage-1 采样重加权依据：none/qpah/co/joint（co 与 joint 用于加强高 CO 端）')
+    ap.add_argument('--n-bins', type=int,
+                    default=cfg_get(cfg, 'stage1', 'n_bins', default=10))
     args = ap.parse_args()
 
     # ---- 结构性参数 ----
@@ -192,7 +197,8 @@ def main():
     dropout = float(args.dropout)
     s1_step = int(cfg_get(cfg, 'stage1', 'sched_step', default=100))
     s1_gamma = float(cfg_get(cfg, 'stage1', 'sched_gamma', default=0.8))
-    s1_rebalance = bool(cfg_get(cfg, 'stage1', 'rebalance_by_qpah', default=True))
+    s1_rebalance_by = str(args.rebalance_by)
+    s1_nbins = int(args.n_bins)
     cap_factor = float(cfg_get(cfg, 'stage1', 'weight_cap_factor', default=2.0))
     s1_eval_every = int(cfg_get(cfg, 'stage1', 'eval_every', default=20))
     s1_patience = int(cfg_get(cfg, 'stage1', 'patience', default=10))
@@ -277,18 +283,41 @@ def main():
                       weight_decay=args.weight_decay)
     sch1 = optim.lr_scheduler.StepLR(opt1, step_size=s1_step, gamma=s1_gamma)
     idx1 = np.where(det)[0]
-    if s1_rebalance:
-        yy1 = y[idx1]
-        bi = np.digitize(yy1, np.linspace(0, 10, 11)) - 1
-        cnt = np.bincount(bi, minlength=10)
-        sw = 1.0 / (cnt[bi] + 1)
+    yy1 = y[idx1]
+    co1 = co_meas[idx1]
+    cnt = np.array([-1])
+    if s1_rebalance_by == 'none':
+        sw = np.ones(len(idx1))
+    else:
+        # 采样重加权：按 qPAH / CO / qPAH×CO 联合分箱，稀有格子权重更大。
+        # 'co' 与 'joint' 用于加强高 CO 端的拟合（CO 与 PAH 争碳 -> 先升后降的拐点区）
+        if s1_rebalance_by == 'qpah':
+            cell = np.digitize(yy1, np.linspace(0, 10, s1_nbins + 1)) - 1
+            ncell = s1_nbins
+        elif s1_rebalance_by == 'co':
+            edges = np.percentile(co1, np.linspace(0, 100, s1_nbins + 1))
+            edges[-1] += 1e-9
+            cell = np.digitize(co1, edges[:-1]) - 1
+            ncell = s1_nbins
+        elif s1_rebalance_by == 'joint':
+            nb = max(2, int(round(np.sqrt(s1_nbins))))
+            bq = np.digitize(yy1, np.linspace(0, 10, nb + 1)) - 1
+            ce = np.percentile(co1, np.linspace(0, 100, nb + 1))
+            ce[-1] += 1e-9
+            bc = np.digitize(co1, ce[:-1]) - 1
+            cell = bq * nb + bc
+            ncell = nb * nb
+        else:
+            raise SystemExit('未知 rebalance_by=%r（可选 none/qpah/co/joint）' % s1_rebalance_by)
+        cell = np.clip(cell, 0, ncell - 1)
+        cnt = np.bincount(cell, minlength=ncell)
+        sw = 1.0 / (cnt[cell] + 1)
         cap = np.percentile(sw, 95) * cap_factor
         sw = np.clip(sw, None, cap)
         sw = sw / sw.sum() * len(sw)
-    else:
-        sw = np.ones(len(idx1))
-    log('  stage1 sampling: rebalance_by_qpah=%s weight_cap_factor=%.1f'
-        % (s1_rebalance, cap_factor))
+    log('  stage1 sampling: rebalance_by=%s n_bins=%d cap_factor=%.1f%s'
+        % (s1_rebalance_by, s1_nbins, cap_factor,
+           '' if s1_rebalance_by == 'none' else ' | 每格样本数 min=%d max=%d' % (cnt.min(), cnt.max())))
     sampler1 = WeightedRandomSampler(torch.tensor(sw, dtype=torch.float64),
                                      num_samples=len(idx1), replacement=True)
     loader1 = DataLoader(TensorDataset(Xt[idx1], yt[idx1], se_t[idx1]),
@@ -458,6 +487,24 @@ def main():
         '|d qPAH/d CO| med=%.3e'
         % (np.median(sig_ratio), np.percentile(sig_ratio, 16),
            np.percentile(sig_ratio, 84), np.median(np.abs(g_co))))
+
+    # ============ CO 响应曲线诊断：碳竞争（先升后降）的强度 ============
+    # 固定其它特征为中位，扫 CO，量出峰值位置与拐点之后的下降幅度。
+    # 物理依据：CO 与 PAH 争夺碳原子 -> qPAH 随 CO 先升后降。
+    co_lo, co_hi = np.percentile(co_meas, [1, 99])
+    co_scan = np.linspace(co_lo, co_hi, 121)
+    xmed = np.median(Xn, axis=0)          # 标准化空间的中位（≈0）
+    Xs = np.tile(xmed, (len(co_scan), 1))
+    Xs[:, 3] = (co_scan - mean[0][3]) / std[0][3]
+    with torch.no_grad():
+        ps = model(torch.tensor(Xs, dtype=torch.float32).to(device)).cpu().numpy()
+    ipk = int(np.argmax(ps))
+    co_peak, co_peak_val = float(co_scan[ipk]), float(ps[ipk])
+    co_end_val = float(ps[-1])
+    co_turnover = ((co_peak_val - co_end_val) / co_peak_val) if co_peak_val != 0 else 0.0
+    log('CO response (others@median): peak CO=%.2f (qPAH=%.3f) -> CO=%.2f (qPAH=%.3f) | '
+        'turnover=%.1f%%'
+        % (co_peak, co_peak_val, co_scan[-1], co_end_val, 100 * co_turnover))
     np.savez(os.path.join(outdir, 'co_true_train.npz'),
              ra=ds['ra'][train_idx], dec=ds['dec'][train_idx],
              co_true=ct, co_meas=cm, co_sigma=cs, co_ratio=co_ratio,
@@ -514,6 +561,8 @@ def main():
                    sigma_ratio_p16=float(np.percentile(sig_ratio, 16)),
                    sigma_ratio_p84=float(np.percentile(sig_ratio, 84)),
                    g_co_abs_med=float(np.median(np.abs(g_co))),
+                   co_peak=co_peak, co_peak_val=co_peak_val,
+                   co_turnover=co_turnover,
                    model_file=os.path.join(outdir, 'model.pth')),
               open(os.path.join(outdir, 'train.json'), 'w'), indent=1)
     log('ALL DONE ->', outdir)

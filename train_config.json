@@ -70,7 +70,8 @@
       "lr": "Adam 初始学习率",
       "sched_step": "StepLR 衰减周期（轮）",
       "sched_gamma": "StepLR 衰减因子",
-      "rebalance_by_qpah": "是否按 qPAH 分箱做加权采样（平衡高低 qPAH 的样本数）",
+      "rebalance_by": "采样重加权依据：none / qpah / co / joint（qpah×CO 联合分箱）。co 与 joint 会加强高 CO 端的拟合",
+      "n_bins": "分箱数（joint 模式下取 sqrt 作为每维箱数）",
       "weight_cap_factor": "采样权重上限 = 该因子 x 权重 p95（调小 -> 更平权；调大 -> 更强调稀有档）"
     },
     "epochs": 1000,
@@ -79,7 +80,8 @@
     "lr": 0.01,
     "sched_step": 100,
     "sched_gamma": 0.8,
-    "rebalance_by_qpah": true,
+    "rebalance_by": "qpah",
+    "n_bins": 10,
     "weight_cap_factor": 2.0
   },
 
