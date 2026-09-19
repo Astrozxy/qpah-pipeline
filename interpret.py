@@ -97,8 +97,8 @@ def main():
     ap.add_argument('--tag', default=None)
     ap.add_argument('--dataset', default=None)
     ap.add_argument('--co-max-pct', type=float, default=99.0,
-                    help='绘图/扫描时 CO 的上限分位数。原实现硬编码 co_max=8.0，'
-                         '远超数据支持范围（CO>=4 的样本仅占 0.02%），属于零样本外推')
+                    help='绘图/扫描时 CO 的上限分位数（默认 99）。保留拐点后的下降趋势；'
+                         '超出数据 p95/p99 的部分会在图上用虚线标出（样本稀疏区）')
     ap.add_argument('--h1-max-pct', type=float, default=95.0,
                     help='绘图/扫描时 H1 的上限分位数')
     args = ap.parse_args()
@@ -180,18 +180,18 @@ def main():
     fixed_h1 = med['H1']
     # 扫描上限用「条件子集」决定：其它特征接近中位的真实样本里 CO 的实际范围。
     # 全体分位数会严重高估（CO 与 dust/H1 强相关，corr~0.7，固定中位推到高 CO 是零样本区）。
-    m_cond = ((np.abs(H1 - med['H1']) <= 0.5 * H1.std()) &
-              (np.abs(sfr - med['sfr']) <= 0.5 * sfr.std()) &
-              (np.abs(H1ew - med['H1_ew']) <= 0.5 * H1ew.std()))
-    if m_cond.sum() >= 50:
-        co_min, co_max = np.percentile(CO[m_cond], [5, args.co_max_pct])
-        src = 'conditional subset n=%d' % m_cond.sum()
-    else:
-        co_min, co_max = np.percentile(CO, [5, args.co_max_pct])
-        src = 'all pixels'
+    # 扫描范围用全体数据的 p1 - p{co_max_pct}：保留完整趋势，
+    # 特别是拐点(CO~1.5)之后的下降 —— 那是碳竞争(CO 与 PAH 争夺碳原子)的偏效应，
+    # 在边际关系里被 dust-CO 混杂掩盖（corr(CO,dust)=+0.73），多变量模型才能学出来。
+    # 超出 p95/p99 的部分样本稀疏，图上用虚线标出，读者可自行判断外推区。
+    co_min, co_max = np.percentile(CO, [1.0, args.co_max_pct])
+    co_p50, co_p95, co_p99 = np.percentile(CO, [50, 95, 99])
     co_vals = np.linspace(co_min, co_max, 200)
-    print('scan range: CO in [%.2f, %.2f] (p5-p%.0f of %s), H1 p5-p%.0f'
-          % (co_min, co_max, args.co_max_pct, src, args.h1_max_pct), flush=True)
+    n_above95 = int((CO > co_p95).sum())
+    print('scan range: CO in [%.2f, %.2f] (p1-p%.1f) | p50=%.2f p95=%.2f p99=%.2f '
+          '| CO>p95 仅 %d px (%.2f%%)'
+          % (co_min, co_max, args.co_max_pct, co_p50, co_p95, co_p99,
+             n_above95, 100.0 * n_above95 / len(CO)), flush=True)
     Sigma_HI_fix = ALPHA_HI * fixed_h1
     Sigma_H2_vals = X_CO * co_vals
     dustA = k * (Sigma_HI_fix + Sigma_H2_vals)
@@ -200,12 +200,20 @@ def main():
     XA[:, 3] = co_vals; XA[:, 4] = fixed_h1ew
     yA = predict(model, scale, XA)
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(Sigma_H2_vals, yA, 'b-', lw=2)
+    ax.plot(Sigma_H2_vals, yA, 'b-', lw=2, label='model')
+    # 数据支持范围：p95/p99 之外样本很稀疏（占比见日志），供读者判断外推区
+    ax.axvline(X_CO * co_p95, color='gray', ls=':', lw=1.2,
+               label='data p95 (CO=%.2f)' % co_p95)
+    ax.axvline(X_CO * co_p99, color='gray', ls='--', lw=1.2,
+               label='data p99 (CO=%.2f)' % co_p99)
+    # 数据里的拐点：多元回归 qPAH~a*CO+b*CO^2 给 b<0（碳竞争），CO*≈1.5
+    ax.axvline(X_CO * 1.48, color='crimson', ls='-.', lw=1.0, alpha=0.7,
+               label=r'data pivot CO$\approx$1.5 (b$<$0)')
     ax.set_xlabel(r'$\Sigma(\mathrm{H}_2)$ (M$_\odot$ pc$^{-2}$)')
     ax.set_ylabel(r'Predicted $q_{\rm PAH}$ (%)')
     ax.set_title(r'Fixed $\Sigma(\mathrm{HI})$ = %.2f M$_\odot$ pc$^{-2}$, k=%.3e'
                  % (Sigma_HI_fix, k))
-    ax.set_xlim(left=0); ax.grid(True)
+    ax.set_xlim(left=0); ax.grid(True); ax.legend(fontsize=8, loc='best')
     fig.tight_layout()
     fig.savefig(os.path.join(resdir, 'fig_interpret_SigmaH2.png'), dpi=150)
     plt.close(fig)
