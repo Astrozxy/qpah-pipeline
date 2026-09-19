@@ -96,6 +96,11 @@ def main():
     ap.add_argument('--selection', choices=['full', 'agb'], default='full')
     ap.add_argument('--tag', default=None)
     ap.add_argument('--dataset', default=None)
+    ap.add_argument('--co-max-pct', type=float, default=99.0,
+                    help='绘图/扫描时 CO 的上限分位数。原实现硬编码 co_max=8.0，'
+                         '远超数据支持范围（CO>=4 的样本仅占 0.02%），属于零样本外推')
+    ap.add_argument('--h1-max-pct', type=float, default=95.0,
+                    help='绘图/扫描时 H1 的上限分位数')
     args = ap.parse_args()
     tag = args.tag or args.selection
     resdir = os.path.join(REPO, 'results', tag)
@@ -173,8 +178,20 @@ def main():
 
     # ---- 场景 A: 固定 HI，变化 CO -> x 轴 Sigma(H2) ----
     fixed_h1 = med['H1']
-    co_min, co_max = np.percentile(CO, 5), 8.0
+    # 扫描上限用「条件子集」决定：其它特征接近中位的真实样本里 CO 的实际范围。
+    # 全体分位数会严重高估（CO 与 dust/H1 强相关，corr~0.7，固定中位推到高 CO 是零样本区）。
+    m_cond = ((np.abs(H1 - med['H1']) <= 0.5 * H1.std()) &
+              (np.abs(sfr - med['sfr']) <= 0.5 * sfr.std()) &
+              (np.abs(H1ew - med['H1_ew']) <= 0.5 * H1ew.std()))
+    if m_cond.sum() >= 50:
+        co_min, co_max = np.percentile(CO[m_cond], [5, args.co_max_pct])
+        src = 'conditional subset n=%d' % m_cond.sum()
+    else:
+        co_min, co_max = np.percentile(CO, [5, args.co_max_pct])
+        src = 'all pixels'
     co_vals = np.linspace(co_min, co_max, 200)
+    print('scan range: CO in [%.2f, %.2f] (p5-p%.0f of %s), H1 p5-p%.0f'
+          % (co_min, co_max, args.co_max_pct, src, args.h1_max_pct), flush=True)
     Sigma_HI_fix = ALPHA_HI * fixed_h1
     Sigma_H2_vals = X_CO * co_vals
     dustA = k * (Sigma_HI_fix + Sigma_H2_vals)
@@ -196,7 +213,7 @@ def main():
 
     # ---- 场景 B: 固定 CO，变化 HI -> x 轴 Sigma(HI) ----
     fixed_co = med['CO']
-    h1_lo, h1_hi = np.percentile(H1, 5), np.percentile(H1, 95)
+    h1_lo, h1_hi = np.percentile(H1, 5), np.percentile(H1, args.h1_max_pct)
     h1_vals = np.linspace(h1_lo, h1_hi, 200)
     Sigma_HI_vals = ALPHA_HI * h1_vals
     Sigma_H2_fix = X_CO * fixed_co

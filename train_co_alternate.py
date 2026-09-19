@@ -194,6 +194,8 @@ def main():
     s1_gamma = float(cfg_get(cfg, 'stage1', 'sched_gamma', default=0.8))
     s1_rebalance = bool(cfg_get(cfg, 'stage1', 'rebalance_by_qpah', default=True))
     cap_factor = float(cfg_get(cfg, 'stage1', 'weight_cap_factor', default=2.0))
+    s1_eval_every = int(cfg_get(cfg, 'stage1', 'eval_every', default=20))
+    s1_patience = int(cfg_get(cfg, 'stage1', 'patience', default=10))
     clamp_min = float(cfg_get(cfg, 'stage2', 'clamp_min', default=0.0))
 
     tag = args.tag or ('coalt_' + args.selection)
@@ -265,6 +267,9 @@ def main():
 
     # ============ Stage-1: CO>3σ 子集训练 ============
     log('Stage-1: train on CO/σ>%.0f pixels (n=%d) ...' % (args.snr_thresh, det.sum()))
+    log('  stage1 early-stop: eval_every=%d patience=%d（val 先降后升，必须早停）'
+        % (s1_eval_every, s1_patience))
+    best_s1, best_s1_ep, bad_s1 = float('inf'), -1, 0
     model = MLPRegressor(hidden=hidden, dropout=dropout).to(device)
     log('  weight_decay=%.1e | ||W|| init=%.3f | hidden=%s'
         % (args.weight_decay, model_norm(model), list(hidden)))
@@ -298,11 +303,31 @@ def main():
             opt1.step()
             tot += loss.item() * bx.size(0)
         sch1.step()
-        if (ep + 1) % 100 == 0:
+        # 用验证集选最优 Stage-1 模型 + 早停（训练 loss 会一直降，但 val 会先降后升）
+        if (ep + 1) % s1_eval_every == 0 or ep == args.stage1_epochs - 1:
+            tr_now = tot / len(idx1)
+            vl = val_loss(model)
+            if vl < best_s1:
+                best_s1, best_s1_ep, bad_s1 = vl, ep + 1, 0
+                torch.save(model.state_dict(), os.path.join(outdir, 'model_stage1.pth'))
+            else:
+                bad_s1 += 1
+            log('  S1 ep %4d tr=%.4f val=%.4f best=%.4f@%d'
+                % (ep + 1, tr_now, vl, best_s1, best_s1_ep))
+            if s1_patience > 0 and bad_s1 >= s1_patience:
+                log('  S1 early stop @ep%d（连续 %d 次评估无改善）' % (ep + 1, bad_s1))
+                break
+        elif (ep + 1) % 100 == 0:
             log('  S1 ep %4d tr=%.4f' % (ep + 1, tot / len(idx1)))
-    torch.save(model.state_dict(), os.path.join(outdir, 'model_stage1.pth'))
+    if best_s1_ep < 0:
+        torch.save(model.state_dict(), os.path.join(outdir, 'model_stage1.pth'))
+    else:
+        model.load_state_dict(torch.load(os.path.join(outdir, 'model_stage1.pth'),
+                                         map_location=device, weights_only=True))
+        log('Stage-1: reloaded best @ep%d (val=%.4f)' % (best_s1_ep, best_s1))
     v1 = val_loss(model)
-    log('Stage-1 val (meas CO): %.4f  ||W||=%.3f' % (v1, model_norm(model)))
+    log('Stage-1 val (meas CO): %.4f  ||W||=%.3f  (best_ep=%d)'
+        % (v1, model_norm(model), best_s1_ep))
 
     # ============ Stage-2a: 冻结模型，只更新 CO_true（全像素，带先验） ============
     # CO_true 只对训练像素优化（val/test 一律用测量 CO，避免泄漏）
@@ -467,7 +492,9 @@ def main():
                    n_test=len(test_idx), snr_thresh=args.snr_thresh,
                    err_weight=not args.no_err_weight, err_floor=args.err_floor,
                    huber_delta=args.huber_delta,
-                   stage1_val=float(v1), stage2_best_val=float(best), best_epoch=best_ep,
+                   stage1_val=float(v1), stage1_best_epoch=best_s1_ep,
+                   stage1_best_val=float(best_s1) if best_s1 < float('inf') else None,
+                   stage2_best_val=float(best), best_epoch=best_ep,
                    co_only_steps=args.co_only_steps, joint_epochs=args.joint_epochs,
                    prior_lambda=args.prior_lambda,
                    chi2_red=chi2_red, pull_med=pull_med, pull_std=pull_std,

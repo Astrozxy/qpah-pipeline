@@ -62,16 +62,20 @@
   },
 
   "stage1": {
-    "_comment": "阶段1：只在 CO 探测像素上训练，CO 固定为观测值（无 CO 先验项）",
+    "_comment": "阶段1：只在 CO 探测像素上训练，CO 固定为观测值（无 CO 先验项）。已加入验证集选优+早停：实测训练 loss 一路降（0.43->0.32@1000轮）但 val 先降后升（300轮 1.071 -> 1000轮 1.958），所以必须靠早停，而不是设固定轮数",
     "_knobs": {
-      "epochs": "训练轮数。注意日志里 Stage-1 训练 loss 到 300 轮仍在下降，可加大",
+      "epochs": "轮数上限（有早停保护，设大一点安全，默认 1000）",
+      "eval_every": "每多少轮评估一次验证集并考虑保存最优",
+      "patience": "连续多少次评估无改善就早停（0 = 关闭早停）",
       "lr": "Adam 初始学习率",
       "sched_step": "StepLR 衰减周期（轮）",
       "sched_gamma": "StepLR 衰减因子",
       "rebalance_by_qpah": "是否按 qPAH 分箱做加权采样（平衡高低 qPAH 的样本数）",
       "weight_cap_factor": "采样权重上限 = 该因子 x 权重 p95（调小 -> 更平权；调大 -> 更强调稀有档）"
     },
-    "epochs": 300,
+    "epochs": 1000,
+    "eval_every": 20,
+    "patience": 10,
     "lr": 0.01,
     "sched_step": 100,
     "sched_gamma": 0.8,
@@ -86,7 +90,7 @@
       "co_lr": "2a 中 CO_true 的学习率",
       "prior_lambda": "CO 先验强度。调小 -> CO_true 更敢偏离观测（观测差的地方靠 qPAH 反推）",
       "clamp_min": "CO_true 下限（0 = 正性约束，负 CO 不物理）",
-      "joint_epochs": "2b 轮数。注意当前 200 轮会过拟合，best 常出现在 20-100 轮之间",
+      "joint_epochs": "2b 轮数。已由 200 降到 50：实测 best_epoch 只在 20-40 轮，后 160 轮纯过拟合（val 从 0.75 涨到 0.99）",
       "joint_model_lr": "2b 中模型参数学习率（小步微调）",
       "joint_co_lr": "2b 中 CO_true 学习率"
     },
@@ -94,7 +98,7 @@
     "co_lr": 0.001,
     "prior_lambda": 1.0,
     "clamp_min": 0.0,
-    "joint_epochs": 200,
+    "joint_epochs": 50,
     "joint_model_lr": 0.0001,
     "joint_co_lr": 0.001
   },
