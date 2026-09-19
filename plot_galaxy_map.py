@@ -4,7 +4,8 @@
 plot_galaxy_map.py — 全样本 RA-Dec 三面板图（观测 / 预测 / 残差）。
 复刻 M31_power_law.ipynb 的 tmp/M31_model.pdf 图：
   - 用训练好的模型对全部有效样本逐像素预测；
-  - 3 面板：Observation / Prediction / Residual(pred-obs)；
+  - 3 面板：Observation / Prediction / chi = (pred-obs)/sigma_eff（相对误差，
+    因为 qPAH 观测误差是异方差的，绝对残差不可比）；
   - 叠加测试扇区（test sectors）的径向虚线 + 边框高亮。
 
 用法:
@@ -60,6 +61,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tag', default='coalt_full')
     ap.add_argument('--dataset', default=None)
+    ap.add_argument('--err-floor', type=float, default=0.2,
+                    help='σ_eff = sqrt(qpah_err² + err_floor²)，需与训练一致')
     args = ap.parse_args()
     resdir = os.path.join(RESULTS, args.tag)
 
@@ -77,7 +80,8 @@ def main():
     idx = ((qpah > 0) & (qpah_err > 0)
            & (X[:, 0] > 0) & (X[:, 1] >= 0) & (X[:, 4] >= 0)
            & np.isfinite(X[:, 3]) & np.isfinite(co_sigma) & (co_sigma > 0))
-    ra = ra[idx]; dec = dec[idx]; qpah = qpah[idx]; X = X[idx]
+    ra = ra[idx]; dec = dec[idx]; qpah = qpah[idx]
+    qpah_err = qpah_err[idx]; X = X[idx]
     print('valid n =', len(qpah), flush=True)
 
     # 扇区划分（与 train_co_alternate.py sector_split 一致）
@@ -245,12 +249,14 @@ def main():
     ax1.set_title("Prediction")
 
     ax2 = fig.add_subplot(133)
-    diff = pred - qpah
-    ax2.scatter(ra, dec, s=0.1, c=cmap_diff(norm_diff(diff)), rasterized=True)
+    # 第 3 面板：相对误差 χ = (pred − obs)/σ_eff（观测误差是异方差的，绝对残差不可比）
+    sig_eff = np.sqrt(qpah_err ** 2 + args.err_floor ** 2)
+    chi = (pred - qpah) / sig_eff
+    ax2.scatter(ra, dec, s=0.1, c=cmap_diff(norm_diff(chi)), rasterized=True)
     draw_radial_lines(ax2, 'magenta')
     highlight_border_sectors(ax2, 'magenta')
     ax2.set_xlabel("RA (J2000)")
-    ax2.set_title(r"Residual (pred $-$ obs)")
+    ax2.set_title(r"$\chi=(\mathrm{pred}-\mathrm{obs})/\sigma_{\rm eff}$")
 
     for ax in [ax0, ax1, ax2]:
         ax.tick_params(direction='in')
@@ -273,7 +279,7 @@ def main():
     sm_res = ScalarMappable(norm=norm_diff, cmap=cmap_diff)
     sm_res.set_array([])
     cbar_res = fig.colorbar(sm_res, cax=cax_res, orientation='vertical')
-    cbar_res.set_label(r"$\Delta q_{\rm PAH}\ (\%)$")
+    cbar_res.set_label(r"$\chi$  $(\sigma_{\rm eff})$")
 
     for cb in [cbar_left, cbar_res]:
         cb.ax.tick_params(direction='in')

@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-render_pred_maps.py — 把 predict_grid.py 输出的全网格预测/残差 FITS 渲染成 PNG。
+render_pred_maps.py — 把 predict_grid.py 输出的全网格预测 / χ FITS 渲染成 PNG。
 
 用法:
     python render_pred_maps.py --tag coalt_full
 读取:
-    data/qpah_pred_map_<tag>.fits, data/qpah_pred_resid_map_<tag>.fits
+    data/qpah_pred_map_<tag>.fits, data/qpah_chi_map_<tag>.fits
 输出:
     results/<tag>/fig_pred_map_<tag>.png
-    results/<tag>/fig_resid_map_<tag>.png
+    results/<tag>/fig_chi_map_<tag>.png
+
+注：χ = (pred − obs)/σ_eff（σ_eff=sqrt(qpah_err²+floor²)）。
+qPAH 观测误差是逐像素异方差的，因此不再画绝对残差图。
 """
 import os, argparse
 os.environ.setdefault('MPLCONFIGDIR', '/tmp/mplconfig')
@@ -56,24 +59,25 @@ def main():
     ap.add_argument('--tag', default='coalt_full')
     ap.add_argument('--pred-vmin', type=float, default=0.0)
     ap.add_argument('--pred-vmax', type=float, default=6.0)
-    ap.add_argument('--resid-vmin', type=float, default=-5.0)
-    ap.add_argument('--resid-vmax', type=float, default=5.0)
+    ap.add_argument('--chi-vmin', type=float, default=-3.0)
+    ap.add_argument('--chi-vmax', type=float, default=3.0)
     args = ap.parse_args()
 
     outdir = os.path.join(RESULTS, args.tag)
     os.makedirs(outdir, exist_ok=True)
     pred_fits = os.path.join(DATA, 'qpah_pred_map_%s.fits' % args.tag)
-    resid_fits = os.path.join(DATA, 'qpah_pred_resid_map_%s.fits' % args.tag)
-    for f in (pred_fits, resid_fits):
+    chi_fits = os.path.join(DATA, 'qpah_chi_map_%s.fits' % args.tag)
+    for f in (pred_fits, chi_fits):
         if not os.path.exists(f):
             raise SystemExit('缺文件: %s（先跑 predict_grid.py --tag %s）' % (f, args.tag))
 
     render(pred_fits, os.path.join(outdir, 'fig_pred_map_%s.png' % args.tag),
            'Predicted qPAH (%%)  [%s, full grid]' % args.tag, 'viridis',
            args.pred_vmin, args.pred_vmax)
-    render(resid_fits, os.path.join(outdir, 'fig_resid_map_%s.png' % args.tag),
-           'Residual (pred - obs)  [%s]' % args.tag, 'RdBu_r',
-           args.resid_vmin, args.resid_vmax, cbar_label='pred - obs (%)')
+    render(chi_fits, os.path.join(outdir, 'fig_chi_map_%s.png' % args.tag),
+           r'$\chi=(\mathrm{pred}-\mathrm{obs})/\sigma_{\rm eff}$  [%s]' % args.tag,
+           'RdBu_r', args.chi_vmin, args.chi_vmax,
+           cbar_label=r'$\chi$   ($\sigma_{\rm eff}$)')
     print('ALL DONE')
 
 

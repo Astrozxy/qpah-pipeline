@@ -66,8 +66,9 @@ def main():
     yt = y[tidx]
     se = np.sqrt(ye[tidx] ** 2 + args.err_floor ** 2)
     print('test pixels = %d (sectors %s)' % (len(tidx), te.tolist()))
-    print('%-26s %9s %9s %8s %9s %9s' %
-          ('model', 'MSE', 'RMSLE', 'chi2_red', 'pull_med', 'pull_std'))
+    print('（不报 MSE/RMSLE：qPAH 观测误差异方差，等权平方误差无物理意义）')
+    print('%-26s %9s %9s %9s %9s %9s' %
+          ('model', 'chi2_red', 'pull_med', 'pull_std', 'pull_p16', 'pull_p84'))
     for spec in args.models:
         name, path = spec.split('=', 1)
         m = MLP().to(dev)
@@ -76,11 +77,10 @@ def main():
         with torch.no_grad():
             pt = m(Xt[tidx]).cpu().numpy()
         pull = (pt - yt) / se
-        mse = float(np.mean((pt - yt) ** 2))
-        rmsle = float(np.sqrt(np.mean((np.log(np.clip(pt, 1e-12, None)) - np.log(yt)) ** 2)))
-        print('%-26s %9.4f %9.4f %8.3f %+9.3f %9.3f' %
-              (name, mse, rmsle, float(np.mean(pull ** 2)),
-               float(np.median(pull)), float(np.std(pull))))
+        print('%-26s %9.3f %+9.3f %9.3f %9.3f %9.3f' %
+              (name, float(np.mean(pull ** 2)), float(np.median(pull)),
+               float(np.std(pull)), float(np.percentile(pull, 16)),
+               float(np.percentile(pull, 84))))
 
 
 if __name__ == '__main__':

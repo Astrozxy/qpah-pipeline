@@ -53,6 +53,8 @@ class MLPRegressor(nn.Module):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tag', default='full')
+    ap.add_argument('--err-floor', type=float, default=0.2,
+                    help='σ_eff = sqrt(qpah_err² + err_floor²)，需与训练一致')
     args = ap.parse_args()
     resdir = os.path.join(REPO, 'results', args.tag)
 
@@ -71,6 +73,9 @@ def main():
     hq = fits.open(os.path.join(DATA, 'M31_S350_110_SSS_110_Model_All_qpah.fits'))
     qpah = (hq[0].data.astype(np.float64) * 100.0)
     hq.close()
+    hu = fits.open(os.path.join(DATA, 'M31_S350_110_SSS_110_Model_All_qpah_unc.fits'))
+    qpah_unc = (hu[0].data.astype(np.float64) * 100.0)
+    hu.close()
     shape = qpah.shape
     fin = np.all(np.isfinite(cols), axis=1)
     pf = np.full(cols.shape[0], np.nan)
@@ -91,9 +96,19 @@ def main():
     resid[m] = pred[m] - qpah[m]
     fits.writeto(os.path.join(DATA, 'qpah_pred_resid_map_%s.fits' % args.tag),
                  resid.astype(np.float32), hdr, overwrite=True)
+    # 相对误差 χ = (pred − obs)/σ_eff：qPAH 观测误差是异方差的，绝对残差不可比
+    sig_eff = np.sqrt(qpah_unc ** 2 + args.err_floor ** 2)
+    chi = np.full(shape, np.nan)
+    mc = m & np.isfinite(sig_eff) & (sig_eff > 0)
+    chi[mc] = resid[mc] / sig_eff[mc]
+    fits.writeto(os.path.join(DATA, 'qpah_chi_map_%s.fits' % args.tag),
+                 chi.astype(np.float32), hdr, overwrite=True)
     print('pred finite=%d  range=[%.3f, %.3f]' % (np.isfinite(pred).sum(),
                                                   np.nanmin(pred), np.nanmax(pred)))
-    print('saved data/qpah_pred_map_%s.fits (+ resid)' % args.tag)
+    print('chi=(pred-obs)/sigma_eff: finite=%d  med=%.3f  p16=%.3f p84=%.3f'
+          % (np.isfinite(chi).sum(), np.nanmedian(chi),
+             np.nanpercentile(chi, 16), np.nanpercentile(chi, 84)))
+    print('saved data/qpah_pred_map_%s.fits (+ resid, + chi map)' % args.tag)
     print('ALL DONE')
 
 

@@ -119,8 +119,8 @@ def main():
     ap.add_argument('--tag', default=None)
     ap.add_argument('--snr-thresh', type=float, default=3.0)
     ap.add_argument('--stage1-epochs', type=int, default=300)
-    ap.add_argument('--co-only-steps', type=int, default=50,
-                    help='Stage-2a 冻结模型时更新 CO_true 的步数')
+    ap.add_argument('--co-only-steps', type=int, default=1000,
+                    help='Stage-2a 冻结模型时更新 CO_true 的步数（50 步远未收敛）')
     ap.add_argument('--co-lr', type=float, default=1e-3)
     ap.add_argument('--joint-epochs', type=int, default=200,
                     help='Stage-2b 联合微调 epoch 数')
@@ -319,10 +319,13 @@ def main():
     log('CO_true/CO_meas (train): med=%.3f p16=%.3f p84=%.3f | (CO_true-CO_meas)/sigma: med=%.2f std=%.2f'
         % (np.nanmedian(co_ratio), np.nanpercentile(co_ratio, 16),
            np.nanpercentile(co_ratio, 84), np.median(co_pull_all), np.std(co_pull_all)))
-    np.savez(os.path.join(outdir, 'co_true_train.npz'),
-             co_true=ct, co_meas=cm, co_sigma=cs, co_ratio=co_ratio,
-             co_pull=co_pull_all, qpah=ytr.detach().cpu().numpy(),
-             qpah_err=sig_eval[train_idx], co_det=det[train_idx])
+    # 正性修正统计：负的 CO 观测不物理，被拉回 ≥0 是物理改进
+    n_neg_meas = int((cm < 0).sum())
+    n_at_zero = int((ct <= 1e-9).sum())
+    log('CO positivity: CO_meas<0 = %d px (%.1f%%) -> 修正到 0 的 = %d px (%.1f%% of all)'
+        % (n_neg_meas, 100 * n_neg_meas / len(cm), n_at_zero, 100 * n_at_zero / len(ct)))
+    n_neg_after = int((ct < 0).sum())
+    log('CO negativity removed: %d px 未修正的负值（应为 0）' % n_neg_after)
 
     # ============ 测试（测量 CO） ============
     # 注意：Stage-2b 结束时内存里的模型是最后一轮（往往已过拟合），
@@ -338,21 +341,50 @@ def main():
         % (model_norm(model),
            ', '.join('%s=%.2f' % (k.replace('.weight', ''), v)
                      for k, v in layer_norms(model).items() if k.endswith('.weight'))))
+
+    # ============ Fisher / 后验误差：qPAH 对 CO 的约束强度 ============
+    # g = d(qPAH)/d(CO)（在最优模型、c_true 处求导）；一维高斯后验：
+    #   I = g²/σ_eff² + λ/σ_CO² ,  σ_post = 1/√I
+    #   σ_post/σ_CO = "qPAH 把 CO 误差压缩到原来的几分之几"（<1 即有额外约束）
+    Xg = Xtr.clone().detach()
+    Xg[:, 3] = (co_true.detach() - mean[0][3]) / std[0][3]
+    Xg.requires_grad_(True)
+    with torch.enable_grad():
+        pred_g = model(Xg)
+        grad_norm = torch.autograd.grad(pred_g.sum(), Xg)[0][:, 3]
+    g_co = (grad_norm / std[0][3]).detach().cpu().numpy().astype(np.float64)
+    se_np = se_tr.detach().cpu().numpy().astype(np.float64)
+    fisher = g_co ** 2 / se_np ** 2 + args.prior_lambda / cs ** 2
+    sigma_post = 1.0 / np.sqrt(fisher)
+    sig_ratio = sigma_post / cs
+    log('CO constraint by qPAH: sigma_post/sigma_CO med=%.3f p16=%.3f p84=%.3f | '
+        '|d qPAH/d CO| med=%.3e'
+        % (np.median(sig_ratio), np.percentile(sig_ratio, 16),
+           np.percentile(sig_ratio, 84), np.median(np.abs(g_co))))
+    np.savez(os.path.join(outdir, 'co_true_train.npz'),
+             ra=ds['ra'][train_idx], dec=ds['dec'][train_idx],
+             co_true=ct, co_meas=cm, co_sigma=cs, co_ratio=co_ratio,
+             co_pull=co_pull_all, qpah=ytr.detach().cpu().numpy(),
+             qpah_err=sig_eval[train_idx], co_det=det[train_idx],
+             g_co=g_co, sigma_post=sigma_post, sigma_ratio=sig_ratio,
+             sigma_eff=se_np)
     model.eval()
     with torch.no_grad():
         pt = model(build_X(co_m, test_idx)).cpu().numpy()
     ytst = y[test_idx]
     stst = sig_eval[test_idx]
-    mse = float(np.mean((pt - ytst) ** 2))
-    rmsle = float(np.sqrt(np.mean((np.log(np.clip(pt, 1e-12, None)) -
-                                   np.log(ytst)) ** 2)))
+    # 注意：不计算 MSE/RMSLE —— qPAH 观测误差是异方差的，等权平方误差没有物理意义。
+    # 拟合质量只用误差加权的 χ² 与 pull 分布来评判。
     pull = (pt - ytst) / stst
     chi2_red = float(np.mean(pull ** 2))
     pull_med = float(np.median(pull))
     pull_std = float(np.std(pull))
+    pull_p16 = float(np.percentile(pull, 16))
+    pull_p84 = float(np.percentile(pull, 84))
     frac_neg = float(np.mean(pt < 0))
-    log('Stage-2 spatial test (meas CO): MSE=%.6f RMSLE=%.6f | chi2_red=%.3f pull med/std=%.3f/%.3f'
-        % (mse, rmsle, chi2_red, pull_med, pull_std))
+    log('Stage-2 spatial test (meas CO): chi2_red=%.3f (ideal 1) | '
+        'pull med=%.3f std=%.3f [p16=%.3f p84=%.3f]'
+        % (chi2_red, pull_med, pull_std, pull_p16, pull_p84))
     json.dump(dict(selection=args.selection, tag=tag, h5=h5path, n=ds['n_total'],
                    n_det=int(det.sum()), n_train=len(train_idx), n_val=len(val_idx),
                    n_test=len(test_idx), snr_thresh=args.snr_thresh,
@@ -360,8 +392,12 @@ def main():
                    huber_delta=args.huber_delta,
                    stage1_val=float(v1), stage2_best_val=float(best), best_epoch=best_ep,
                    co_only_steps=args.co_only_steps, joint_epochs=args.joint_epochs,
-                   prior_lambda=args.prior_lambda, mse=mse, rmsle=rmsle,
+                   prior_lambda=args.prior_lambda,
                    chi2_red=chi2_red, pull_med=pull_med, pull_std=pull_std,
+                   pull_p16=pull_p16, pull_p84=pull_p84,
+                   co_frac_meas_neg=float(100.0 * n_neg_meas / len(cm)),
+                   co_frac_at_zero=float(100.0 * n_at_zero / len(ct)),
+                   co_min=float(ct.min()),
                    frac_pred_neg=frac_neg, final_eval_model=final_note.strip(),
                    weight_decay=args.weight_decay,
                    sigma_eff_med=float(np.median(sig_eval)),
@@ -370,6 +406,10 @@ def main():
                    co_true_ratio_p84=float(np.nanpercentile(co_ratio, 84)),
                    co_true_pull_med=float(np.median(co_pull_all)),
                    co_true_pull_std=float(np.std(co_pull_all)),
+                   sigma_ratio_med=float(np.median(sig_ratio)),
+                   sigma_ratio_p16=float(np.percentile(sig_ratio, 16)),
+                   sigma_ratio_p84=float(np.percentile(sig_ratio, 84)),
+                   g_co_abs_med=float(np.median(np.abs(g_co))),
                    model_file=os.path.join(outdir, 'model.pth')),
               open(os.path.join(outdir, 'train.json'), 'w'), indent=1)
     log('ALL DONE ->', outdir)
