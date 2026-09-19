@@ -96,11 +96,13 @@ def main():
     print('train sectors', tr.tolist(), '| test sectors', te.tolist(), flush=True)
 
     # 加载模型 + scale，预测全部样本
-    model = MLPRegressor().to(device)
+    scale = json.load(open(os.path.join(resdir, 'scale.json')))
+    model = MLPRegressor(
+        hidden=tuple(scale.get('model_hidden', [32, 32])),
+        dropout=float(scale.get('model_dropout', 0.0))).to(device)
     model.load_state_dict(torch.load(os.path.join(resdir, 'model.pth'),
                                      map_location=device, weights_only=True))
     model.eval()
-    scale = json.load(open(os.path.join(resdir, 'scale.json')))
     mean = np.array(scale['mean'])[None, :]
     std = np.array(scale['std'])[None, :]
     tmeta = scale.get('transform')

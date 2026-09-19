@@ -22,11 +22,16 @@ dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class MLP(nn.Module):
-    def __init__(self):
+    def __init__(self, hidden=(32, 32), dropout=0.0):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(5, 32), nn.Tanh(),
-                                 nn.Linear(32, 32), nn.Tanh(),
-                                 nn.Linear(32, 1))
+        layers, in_dim = [], 5
+        for h in hidden:
+            layers += [nn.Linear(in_dim, h), nn.Tanh()]
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = h
+        layers.append(nn.Linear(in_dim, 1))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x).flatten()
@@ -61,6 +66,8 @@ def main():
     sc = json.load(open('qpah_pipeline/results/%s/scale.json' % args.tag))
     mean = np.array(sc['mean'])[None, :]
     std = np.array(sc['std'])[None, :]
+    hidden = tuple(sc.get('model_hidden', [32, 32]))
+    dropout = float(sc.get('model_dropout', 0.0))
     Xt = torch.tensor((X - mean) / std, dtype=torch.float32).to(dev)
 
     yt = y[tidx]
@@ -71,7 +78,7 @@ def main():
           ('model', 'chi2_red', 'pull_med', 'pull_std', 'pull_p16', 'pull_p84'))
     for spec in args.models:
         name, path = spec.split('=', 1)
-        m = MLP().to(dev)
+        m = MLP(hidden=hidden, dropout=dropout).to(dev)
         m.load_state_dict(torch.load(path, map_location=dev, weights_only=True))
         m.eval()
         with torch.no_grad():

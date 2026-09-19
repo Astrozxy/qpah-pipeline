@@ -55,11 +55,13 @@ def set_seed(seed=random_state):
 
 
 class MLPRegressor(nn.Module):
-    def __init__(self, input_dim=5, hidden=(32, 32)):
+    def __init__(self, input_dim=5, hidden=(32, 32), dropout=0.0):
         super().__init__()
         layers, in_dim = [], input_dim
         for h in hidden:
             layers += [nn.Linear(in_dim, h), nn.Tanh()]
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
             in_dim = h
         layers.append(nn.Linear(in_dim, 1))
         self.net = nn.Sequential(*layers)
@@ -70,6 +72,24 @@ class MLPRegressor(nn.Module):
 
 def phuber(r, delta=10.0):
     return delta ** 2 * (torch.sqrt(1 + (r / delta) ** 2) - 1)
+
+
+def load_config(path):
+    """读 JSON 配置；文件不存在则返回 {}（全部用内置默认值）。"""
+    if path and os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+
+def cfg_get(cfg, *keys, default=None):
+    """嵌套取值：cfg_get(cfg, 'stage1', 'lr', default=0.01)。"""
+    cur = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
 
 def model_norm(model):
@@ -99,51 +119,93 @@ def load_h5(h5path):
     return out
 
 
-def sector_split(ds):
+def sector_split(ds, n_sectors=10, train_frac=0.6, val_frac=0.2, seed=0):
+    """按方位角分 n_sectors 个扇区，取 train_frac 作训练扇区，其余作测试扇区。"""
     ang = np.arctan2(ds['dec'] - 41.25, ds['ra'] - 10.75)
     ang = (ang + 2 * np.pi) % (2 * np.pi)
-    sec = np.digitize(ang, np.linspace(0, 2 * np.pi, 11)) - 1
-    tr = np.random.choice(np.arange(10), size=6, replace=False)
-    te = np.setdiff1d(np.arange(10), tr)
+    sec = np.digitize(ang, np.linspace(0, 2 * np.pi, n_sectors + 1)) - 1
+    n_tr = int(round(n_sectors * train_frac))
+    tr = np.random.choice(np.arange(n_sectors), size=n_tr, replace=False)
+    te = np.setdiff1d(np.arange(n_sectors), tr)
     train_full = np.where(np.isin(sec, tr))[0]
     test_idx = np.where(np.isin(sec, te))[0]
-    train_idx, val_idx = train_test_split(train_full, test_size=0.2,
-                                          random_state=random_state)
+    train_idx, val_idx = train_test_split(train_full, test_size=val_frac,
+                                          random_state=seed)
     return tr, te, train_idx, val_idx, test_idx
 
 
 def main():
+    # ---- 先解析 --config，用 JSON 里的值作为其余参数的默认值 ----
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument('--config', default=os.path.join(REPO, 'train_config.json'))
+    cfg_path = _pre.parse_known_args()[0].config
+    cfg = load_config(cfg_path)
+
     ap = argparse.ArgumentParser()
-    ap.add_argument('--selection', choices=['full', 'agb'], default='full')
-    ap.add_argument('--dataset', default=None)
+    ap.add_argument('--config', default=cfg_path)
+    ap.add_argument('--selection', choices=['full', 'agb'],
+                    default=cfg_get(cfg, 'data', 'selection', default='full'))
+    ap.add_argument('--dataset', default=cfg_get(cfg, 'data', 'h5', default=None))
     ap.add_argument('--tag', default=None)
-    ap.add_argument('--snr-thresh', type=float, default=3.0)
-    ap.add_argument('--stage1-epochs', type=int, default=300)
-    ap.add_argument('--co-only-steps', type=int, default=1000,
-                    help='Stage-2a 冻结模型时更新 CO_true 的步数（50 步远未收敛）')
-    ap.add_argument('--co-lr', type=float, default=1e-3)
-    ap.add_argument('--joint-epochs', type=int, default=200,
-                    help='Stage-2b 联合微调 epoch 数')
-    ap.add_argument('--joint-model-lr', type=float, default=1e-4)
-    ap.add_argument('--joint-co-lr', type=float, default=1e-3)
-    ap.add_argument('--prior-lambda', type=float, default=1.0)
-    ap.add_argument('--batch-size', type=int, default=4096)
-    ap.add_argument('--err-floor', type=float, default=0.2,
-                    help='qpah_err 异方差 loss 的 floor（σ_eff=sqrt(err²+floor²)）')
-    ap.add_argument('--huber-delta', type=float, default=10.0,
-                    help='Pseudo-Huber δ（作用于残差/σ_eff 之后）')
+    ap.add_argument('--snr-thresh', type=float,
+                    default=cfg_get(cfg, 'data', 'snr_thresh', default=3.0))
+    ap.add_argument('--stage1-epochs', type=int,
+                    default=cfg_get(cfg, 'stage1', 'epochs', default=300))
+    ap.add_argument('--stage1-lr', type=float,
+                    default=cfg_get(cfg, 'stage1', 'lr', default=0.01))
+    ap.add_argument('--co-only-steps', type=int,
+                    default=cfg_get(cfg, 'stage2', 'co_only_steps', default=1000))
+    ap.add_argument('--co-lr', type=float,
+                    default=cfg_get(cfg, 'stage2', 'co_lr', default=1e-3))
+    ap.add_argument('--joint-epochs', type=int,
+                    default=cfg_get(cfg, 'stage2', 'joint_epochs', default=200))
+    ap.add_argument('--joint-model-lr', type=float,
+                    default=cfg_get(cfg, 'stage2', 'joint_model_lr', default=1e-4))
+    ap.add_argument('--joint-co-lr', type=float,
+                    default=cfg_get(cfg, 'stage2', 'joint_co_lr', default=1e-3))
+    ap.add_argument('--prior-lambda', type=float,
+                    default=cfg_get(cfg, 'stage2', 'prior_lambda', default=1.0))
+    ap.add_argument('--batch-size', type=int,
+                    default=cfg_get(cfg, 'optim', 'batch_size', default=4096))
+    ap.add_argument('--err-floor', type=float,
+                    default=cfg_get(cfg, 'loss', 'err_floor', default=0.2))
+    ap.add_argument('--huber-delta', type=float,
+                    default=cfg_get(cfg, 'loss', 'huber_delta', default=10.0))
     ap.add_argument('--no-err-weight', action='store_true',
-                    help='回退等权 Pseudo-Huber（不除以 qpah_err）')
-    ap.add_argument('--weight-decay', type=float, default=1e-4,
-                    help='MLP 权重 L2 正则（Adam weight_decay）。只作用于模型参数，'
-                         '不作用于 CO_true（后者的正则来自 CO 先验项）；设 0 关闭')
+                    default=not cfg_get(cfg, 'loss', 'err_weight', default=True),
+                    help='回退等权 Pseudo-Huber（默认由 config 的 loss.err_weight 决定）')
+    ap.add_argument('--weight-decay', type=float,
+                    default=cfg_get(cfg, 'optim', 'weight_decay', default=1e-4))
+    ap.add_argument('--hidden', nargs='+', type=int,
+                    default=list(cfg_get(cfg, 'model', 'hidden', default=[32, 32])),
+                    help='MLP 隐层宽度，例：--hidden 64 64 32')
+    ap.add_argument('--dropout', type=float,
+                    default=cfg_get(cfg, 'model', 'dropout', default=0.0))
     args = ap.parse_args()
+
+    # ---- 结构性参数 ----
+    seed = int(cfg_get(cfg, 'split', 'random_state', default=0))
+    n_sectors = int(cfg_get(cfg, 'split', 'n_sectors', default=10))
+    train_frac = float(cfg_get(cfg, 'split', 'train_sector_frac', default=0.6))
+    val_frac = float(cfg_get(cfg, 'split', 'val_frac_of_train', default=0.2))
+    hidden = tuple(args.hidden)
+    dropout = float(args.dropout)
+    s1_step = int(cfg_get(cfg, 'stage1', 'sched_step', default=100))
+    s1_gamma = float(cfg_get(cfg, 'stage1', 'sched_gamma', default=0.8))
+    s1_rebalance = bool(cfg_get(cfg, 'stage1', 'rebalance_by_qpah', default=True))
+    cap_factor = float(cfg_get(cfg, 'stage1', 'weight_cap_factor', default=2.0))
+    clamp_min = float(cfg_get(cfg, 'stage2', 'clamp_min', default=0.0))
+
     tag = args.tag or ('coalt_' + args.selection)
     outdir = os.path.join(RESULTS, tag)
     os.makedirs(outdir, exist_ok=True)
 
     print('device:', device, flush=True)
-    set_seed(random_state)
+    log('config: %s' % (cfg_path if cfg_path and os.path.exists(cfg_path)
+                        else '(未找到 %s，使用内置默认值)' % cfg_path))
+    log('model: hidden=%s dropout=%.2f | split: %d sectors, train_frac=%.2f, val_frac=%.2f, seed=%d'
+        % (list(hidden), dropout, n_sectors, train_frac, val_frac, seed))
+    set_seed(seed)
     h5path = args.dataset or os.path.join(DATA, SEL_FILE[args.selection])
     ds = load_h5(h5path)
     log('valid rows (有 CO 观测):', ds['n_total'])
@@ -172,10 +234,13 @@ def main():
            np.median(qpah_err), np.percentile(qpah_err, 84)))
 
     json.dump({'features': FEATURES, 'mean': mean.flatten().tolist(),
-               'std': std.flatten().tolist(), 'transform': None},
+               'std': std.flatten().tolist(), 'transform': None,
+               'model_hidden': list(hidden), 'model_dropout': dropout},
               open(os.path.join(outdir, 'scale.json'), 'w'), indent=1)
 
-    tr_s, te_s, train_idx, val_idx, test_idx = sector_split(ds)
+    tr_s, te_s, train_idx, val_idx, test_idx = sector_split(
+        ds, n_sectors=n_sectors, train_frac=train_frac,
+        val_frac=val_frac, seed=seed)
     log('train sectors %s | test sectors %s' % (tr_s, te_s))
     log('train/val/test:', len(train_idx), len(val_idx), len(test_idx))
 
@@ -200,18 +265,25 @@ def main():
 
     # ============ Stage-1: CO>3σ 子集训练 ============
     log('Stage-1: train on CO/σ>%.0f pixels (n=%d) ...' % (args.snr_thresh, det.sum()))
-    model = MLPRegressor().to(device)
-    log('  weight_decay=%.1e | ||W|| init=%.3f' % (args.weight_decay, model_norm(model)))
-    opt1 = optim.Adam(model.parameters(), lr=0.01, weight_decay=args.weight_decay)
-    sch1 = optim.lr_scheduler.StepLR(opt1, step_size=100, gamma=0.8)
+    model = MLPRegressor(hidden=hidden, dropout=dropout).to(device)
+    log('  weight_decay=%.1e | ||W|| init=%.3f | hidden=%s'
+        % (args.weight_decay, model_norm(model), list(hidden)))
+    opt1 = optim.Adam(model.parameters(), lr=args.stage1_lr,
+                      weight_decay=args.weight_decay)
+    sch1 = optim.lr_scheduler.StepLR(opt1, step_size=s1_step, gamma=s1_gamma)
     idx1 = np.where(det)[0]
-    yy1 = y[idx1]
-    bi = np.digitize(yy1, np.linspace(0, 10, 11)) - 1
-    cnt = np.bincount(bi, minlength=10)
-    sw = 1.0 / (cnt[bi] + 1)
-    cap = np.percentile(sw, 95) * 2
-    sw = np.clip(sw, None, cap)
-    sw = sw / sw.sum() * len(sw)
+    if s1_rebalance:
+        yy1 = y[idx1]
+        bi = np.digitize(yy1, np.linspace(0, 10, 11)) - 1
+        cnt = np.bincount(bi, minlength=10)
+        sw = 1.0 / (cnt[bi] + 1)
+        cap = np.percentile(sw, 95) * cap_factor
+        sw = np.clip(sw, None, cap)
+        sw = sw / sw.sum() * len(sw)
+    else:
+        sw = np.ones(len(idx1))
+    log('  stage1 sampling: rebalance_by_qpah=%s weight_cap_factor=%.1f'
+        % (s1_rebalance, cap_factor))
     sampler1 = WeightedRandomSampler(torch.tensor(sw, dtype=torch.float64),
                                      num_samples=len(idx1), replacement=True)
     loader1 = DataLoader(TensorDataset(Xt[idx1], yt[idx1], se_t[idx1]),
@@ -263,7 +335,7 @@ def main():
         loss.backward()
         opt_co.step()
         with torch.no_grad():
-            co_true.data.clamp_(min=0.0)
+            co_true.data.clamp_(min=clamp_min)
         if (k + 1) % 10 == 0:
             with torch.no_grad():
                 q_now, pr_now = co_loss_parts()
@@ -296,7 +368,7 @@ def main():
             (q + 0.5 * args.prior_lambda * pr).backward()
             opt_j.step()
             with torch.no_grad():
-                co_true.data.clamp_(min=0.0)
+                co_true.data.clamp_(min=clamp_min)
             tot += q.item() * len(ib)
         if (ep + 1) % 20 == 0 or ep == args.joint_epochs - 1:
             vl = val_loss(model)
@@ -386,6 +458,11 @@ def main():
         'pull med=%.3f std=%.3f [p16=%.3f p84=%.3f]'
         % (chi2_red, pull_med, pull_std, pull_p16, pull_p84))
     json.dump(dict(selection=args.selection, tag=tag, h5=h5path, n=ds['n_total'],
+                   config_file=cfg_path,
+                   config=cfg,
+                   model_hidden=list(hidden), model_dropout=dropout,
+                   split=dict(n_sectors=n_sectors, train_sector_frac=train_frac,
+                              val_frac_of_train=val_frac, random_state=seed),
                    n_det=int(det.sum()), n_train=len(train_idx), n_val=len(val_idx),
                    n_test=len(test_idx), snr_thresh=args.snr_thresh,
                    err_weight=not args.no_err_weight, err_floor=args.err_floor,

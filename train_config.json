@@ -1,0 +1,121 @@
+{
+  "_README": [
+    "======================================================================",
+    " train_co_alternate.py 训练配置（M31: qPAH <- CO/HI/SFR/dust/H1_EW）",
+    "======================================================================",
+    "用法：",
+    "  python qpah_pipeline/train_co_alternate.py --config qpah_pipeline/train_config.json --tag myrun",
+    "  - 命令行参数会覆盖本文件的同名项（例：--co-only-steps 2000）",
+    "  - 每次运行会把【实际生效】的配置存进 results/<tag>/train.json 的 config 字段，便于复现",
+    "  - JSON 不支持注释，因此说明都写在每个分组的 _comment / _knobs 里",
+    "",
+    "三步流程（严格按用户方案）：",
+    "  Stage-1 : 只用 CO/sigma > snr_thresh 的像素训练，【假设观测值就是真值】（不加 CO 先验项）",
+    "  Stage-2a: 冻结模型，以 CO 观测为先验，反推【全部训练扇区像素】的 CO_true（不论 S/N）",
+    "  Stage-2b: 用更新后的 CO_true 训练，同时放开模型参数，联合微调",
+    "  约定：测试扇区不做反推（否则等于用 qPAH 标签反推输入 = 泄漏），预测一律用观测值输入。",
+    "",
+    "【高 CO 端失真】优先看这几个旋钮：",
+    "  1) model.hidden            —— 容量（现在只有 1281 参数）",
+    "  2) optim.weight_decay      —— 压制模型响应的直接元凶之一（g 会变小）",
+    "  3) loss.huber_delta        —— 太小会压制大残差（高值端欠拟合）",
+    "  4) stage1.rebalance_by_qpah / weight_cap_factor —— 高低值的采样平衡",
+    "  5) stage2.prior_lambda     —— 只影响 CO_true，不影响 qPAH 拟合本身"
+  ],
+
+  "data": {
+    "_comment": "数据与像素筛选",
+    "_knobs": {
+      "selection": "full = 全盘（主数据集）；agb = AGB>=3 且剔除 M32",
+      "snr_thresh": "CO 探测阈值 S/N。只决定 Stage-1 用哪些像素训练；Stage-2a 一律用全部像素",
+      "h5": "可选：直接指定数据集路径（留 null 则按 selection 自动选 data/M31_1d_array_<selection>.h5）"
+    },
+    "selection": "full",
+    "snr_thresh": 3.0,
+    "h5": null
+  },
+
+  "split": {
+    "_comment": "空间扇区划分：按方位角分 n_sectors 个扇区，取 train_sector_frac 作训练、其余作测试（防空间泄漏）",
+    "_knobs": {
+      "n_sectors": "扇区数量",
+      "train_sector_frac": "训练扇区比例（0.6 = 6/10）",
+      "val_frac_of_train": "从训练扇区里再切出的验证集比例（用于选最优模型、早停）",
+      "random_state": "随机种子：决定扇区选择、训练/验证划分、以及网络初始化"
+    },
+    "n_sectors": 10,
+    "train_sector_frac": 0.6,
+    "val_frac_of_train": 0.2,
+    "random_state": 0
+  },
+
+  "model": {
+    "_comment": "MLP 结构。当前默认 5-32-32-1 只有约 1281 个参数，容量偏小",
+    "_knobs": {
+      "hidden": "各隐层宽度列表，例 [64, 64] / [128, 64, 32] / [256, 128]",
+      "dropout": "隐层 dropout 概率（0 = 关闭）"
+    },
+    "hidden": [32, 32],
+    "dropout": 0.0
+  },
+
+  "stage1": {
+    "_comment": "阶段1：只在 CO 探测像素上训练，CO 固定为观测值（无 CO 先验项）",
+    "_knobs": {
+      "epochs": "训练轮数。注意日志里 Stage-1 训练 loss 到 300 轮仍在下降，可加大",
+      "lr": "Adam 初始学习率",
+      "sched_step": "StepLR 衰减周期（轮）",
+      "sched_gamma": "StepLR 衰减因子",
+      "rebalance_by_qpah": "是否按 qPAH 分箱做加权采样（平衡高低 qPAH 的样本数）",
+      "weight_cap_factor": "采样权重上限 = 该因子 x 权重 p95（调小 -> 更平权；调大 -> 更强调稀有档）"
+    },
+    "epochs": 300,
+    "lr": 0.01,
+    "sched_step": 100,
+    "sched_gamma": 0.8,
+    "rebalance_by_qpah": true,
+    "weight_cap_factor": 2.0
+  },
+
+  "stage2": {
+    "_comment": "阶段2a/2b。prior_lambda 是 CO 高斯先验强度：loss += 0.5*lambda*((c-CO_meas)/sigma_CO)^2",
+    "_knobs": {
+      "co_only_steps": "2a 步数。50 步远未收敛（loss 仍在降），默认已改 1000；可继续加大",
+      "co_lr": "2a 中 CO_true 的学习率",
+      "prior_lambda": "CO 先验强度。调小 -> CO_true 更敢偏离观测（观测差的地方靠 qPAH 反推）",
+      "clamp_min": "CO_true 下限（0 = 正性约束，负 CO 不物理）",
+      "joint_epochs": "2b 轮数。注意当前 200 轮会过拟合，best 常出现在 20-100 轮之间",
+      "joint_model_lr": "2b 中模型参数学习率（小步微调）",
+      "joint_co_lr": "2b 中 CO_true 学习率"
+    },
+    "co_only_steps": 1000,
+    "co_lr": 0.001,
+    "prior_lambda": 1.0,
+    "clamp_min": 0.0,
+    "joint_epochs": 200,
+    "joint_model_lr": 0.0001,
+    "joint_co_lr": 0.001
+  },
+
+  "loss": {
+    "_comment": "qPAH 拟合项：误差加权 Pseudo-Huber，r=(pred-y)/sigma_eff，sigma_eff=sqrt(qpah_err^2+err_floor^2)",
+    "_knobs": {
+      "err_weight": "true = 按 qpah_err 异方差加权（推荐）；false = 等权（仅作对照；chi2/pull 仍按真 sigma 计算）",
+      "err_floor": "sigma_eff 下限。调大 -> 低误差像素被降权；调小 -> 低误差像素主导 loss",
+      "huber_delta": "Pseudo-Huber delta。调小更鲁棒（大残差被压制，可能加重高值端欠拟合）；调大接近平方损失"
+    },
+    "err_weight": true,
+    "err_floor": 0.2,
+    "huber_delta": 10.0
+  },
+
+  "optim": {
+    "_comment": "优化器与正则",
+    "_knobs": {
+      "weight_decay": "模型参数 L2 正则（Adam，仅作用于模型、不作用于 CO_true）。调大 -> 压制模型对输入的响应",
+      "batch_size": "2a/2b 的 batch 大小"
+    },
+    "weight_decay": 0.0001,
+    "batch_size": 4096
+  }
+}

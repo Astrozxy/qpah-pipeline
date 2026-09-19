@@ -100,11 +100,13 @@ def main():
     tag = args.tag or args.selection
     resdir = os.path.join(REPO, 'results', tag)
 
-    model = MLPRegressor(len(FEATURES))
+    scale = json.load(open(os.path.join(resdir, 'scale.json')))
+    model = MLPRegressor(len(FEATURES),
+                         hidden=tuple(scale.get('model_hidden', [32, 32])),
+                         dropout=float(scale.get('model_dropout', 0.0)))
     model.load_state_dict(torch.load(os.path.join(resdir, 'model.pth'),
                                      map_location=device, weights_only=True))
     model.to(device).eval()
-    scale = json.load(open(os.path.join(resdir, 'scale.json')))
 
     h5path = args.dataset or os.path.join(DATA, SEL_FILE[args.selection])
     ds = load_data(h5path)
