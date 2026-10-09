@@ -26,7 +26,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-FEATS = ['H1', 'sfr', 'CO', 'H1_ew']
+FEATS = ['H1', 'sfr', 'CO', 'H1_ew', 'Ldust']   # 定稿模型
 RA0, DEC0, INC, PA = 10.6847, 41.2690, np.radians(77.7), np.radians(37.7)
 
 

@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.patches import Rectangle
 
-DEFAULT_FEATS = ['H1', 'sfr', 'CO', 'H1_ew']
+DEFAULT_FEATS = ['H1', 'sfr', 'CO', 'H1_ew', 'Ldust']   # 定稿模型
 
 
 # ---------------------------------------------------------------- 连通域（自己写，免依赖）

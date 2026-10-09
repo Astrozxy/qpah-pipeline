@@ -29,7 +29,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 
-FEATS = ['H1', 'sfr', 'CO', 'H1_ew']
+FEATS = ['H1', 'sfr', 'CO', 'H1_ew', 'Ldust']   # 定稿模型
 # M31 盘几何（Draine+2014 采用值）
 RA0, DEC0 = 10.6847, 41.2690
 INC, PA = np.radians(77.7), np.radians(37.7)

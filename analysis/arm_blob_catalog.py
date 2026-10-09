@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.colors import Normalize
 
-FEATS = ['H1', 'sfr', 'CO', 'H1_ew']
+FEATS = ['H1', 'sfr', 'CO', 'H1_ew', 'Ldust']   # 定稿模型
 RA0, DEC0, INC, PA = 10.6847, 41.2690, np.radians(77.7), np.radians(37.7)
 
 
