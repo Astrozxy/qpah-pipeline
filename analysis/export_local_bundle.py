@@ -71,7 +71,7 @@ def main():
     # ---- 3. 紧凑 aux：每行的 coverage / 边缘距 / 空间项 ----
     with h5py.File(os.path.join(DATA, 'M31_1d_array_nodust.h5'), 'r') as f:
         d = {k: f[k][:] for k in ['ra', 'dec', 'qpah', 'qpah_err', 'CO_sigma'] + FEATS}
-    sel = ((d['qpah'] > 0) & (d['qpah_err'] > 0) & np.isfinite(d['H1']) & (d['H1'] >= 0)
+    sel = ((d['qpah'] >= 0) & (d['qpah_err'] > 0) & np.isfinite(d['H1']) & (d['H1'] >= 0)
            & np.isfinite(d['H1_ew']) & (d['H1_ew'] >= 0) & np.isfinite(d['sfr'])
            & np.isfinite(d['CO']) & np.isfinite(d['CO_sigma']) & (d['CO_sigma'] > 0))
     ra, dec = d['ra'][sel].astype(np.float64), d['dec'][sel].astype(np.float64)

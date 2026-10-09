@@ -41,7 +41,7 @@ def main():
     with h5py.File(args.h5, 'r') as f:
         cols = list(f.keys())
         d = {k: f[k][:] for k in cols}
-    base = ((d['qpah'] > 0) & (d['qpah_err'] > 0) & np.isfinite(d['H1']) & (d['H1'] >= 0)
+    base = ((d['qpah'] >= 0) & (d['qpah_err'] > 0) & np.isfinite(d['H1']) & (d['H1'] >= 0)
             & np.isfinite(d['H1_ew']) & (d['H1_ew'] >= 0) & np.isfinite(d['sfr'])
             & np.isfinite(d['CO']) & np.isfinite(d['CO_sigma']) & (d['CO_sigma'] > 0))
     keep = base & (d['qpah_err'] <= args.qpah_err_max)

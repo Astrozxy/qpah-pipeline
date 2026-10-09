@@ -67,7 +67,7 @@ def main():
     with h5py.File(args.h5, 'r') as f:
         keys = ['ra', 'dec', 'qpah', 'qpah_err', 'CO_sigma'] + feats
         d = {k: f[k][:] for k in keys if k in f}
-    sel = ((d['qpah'] > 0) & (d['qpah_err'] > 0))
+    sel = ((d['qpah'] >= 0) & (d['qpah_err'] > 0))
     for f_ in feats:                                   # 只要求用到的特征有限
         sel &= np.isfinite(d[f_])
     if 'dust_density' in feats:

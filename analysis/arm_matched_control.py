@@ -58,7 +58,7 @@ def main():
     with h5py.File(args.h5, 'r') as f:
         keys = ['ra', 'dec', 'qpah', 'qpah_err', 'CO_sigma'] + FEATS
         d = {k: f[k][:] for k in keys if k in f}
-    sel = (d['qpah'] > 0) & (d['qpah_err'] > 0)
+    sel = (d['qpah'] >= 0) & (d['qpah_err'] > 0)
     for k in FEATS:
         sel &= np.isfinite(d[k])
     sel &= (d['H1'] >= 0) & (d['H1_ew'] >= 0) & np.isfinite(d['CO_sigma']) & (d['CO_sigma'] > 0)

@@ -98,7 +98,7 @@ def main():
     print('CO 预处理   : 裁剪到 ≥0（负 CO 非物理）')
     print()
 
-    base = ((d['qpah'] > 0) & (d['qpah_err'] > 0)
+    base = ((d['qpah'] >= 0) & (d['qpah_err'] > 0)
             & np.isfinite(d['H1']) & (d['H1'] >= 0)
             & np.isfinite(d['H1_ew']) & (d['H1_ew'] >= 0)
             & np.isfinite(d['sfr']) & np.isfinite(d['CO'])

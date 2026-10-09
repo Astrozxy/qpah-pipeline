@@ -68,7 +68,7 @@ def main():
     with h5py.File(args.h5, 'r') as f:
         keys = ['ra', 'dec', 'qpah', 'qpah_err', 'CO_sigma'] + feats
         d = {k: f[k][:] for k in dict.fromkeys(keys) if k in f}
-    sel = (d['qpah'] > 0) & (d['qpah_err'] > 0)
+    sel = (d['qpah'] >= 0) & (d['qpah_err'] > 0)
     if args.qpah_err_max is not None:
         sel &= d['qpah_err'] <= args.qpah_err_max
     for k in feats:
