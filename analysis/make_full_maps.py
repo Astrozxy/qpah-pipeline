@@ -56,6 +56,8 @@ def main():
     ap.add_argument('--qmax', type=float, default=6.0, help='qPAH 色标上限 (%)')
     ap.add_argument('--chi-vmax', type=float, default=3.0, help='相对误差色标范围 ±(sigma)')
     ap.add_argument('--abs-vmax', type=float, default=2.0, help='绝对误差色标范围 ±(%)')
+    ap.add_argument('--qpah-err-max', type=float, default=None,
+                    help='只保留 qpah_err <= 该值的目标像素（默认不切）')
     args = ap.parse_args()
     feats, spa = args.features, list(args.spatial)
 
@@ -63,6 +65,8 @@ def main():
         keys = ['ra', 'dec', 'qpah', 'qpah_err', 'CO_sigma'] + feats
         d = {k: f[k][:] for k in dict.fromkeys(keys) if k in f}
     sel = (d['qpah'] > 0) & (d['qpah_err'] > 0)
+    if args.qpah_err_max is not None:
+        sel &= d['qpah_err'] <= args.qpah_err_max
     for k in feats:
         sel &= np.isfinite(d[k])
     if 'dust_density' in feats:
@@ -109,9 +113,10 @@ def main():
     c2_tr, _, _ = met(in_tr)
     c2_te, pm_te, ps_te = met(~in_tr)
     c2_all, pm_all, ps_all = met(np.ones(len(y), bool))
-    print('n=%d (train %d / test %d) | 观测量 %s | 空间项 %s'
+    print('n=%d (train %d / test %d) | 观测量 %s | 空间项 %s%s'
           % (len(y), in_tr.sum(), (~in_tr).sum(), ' '.join(feats),
-             ' '.join(spa) if spa else '(无)'))
+             ' '.join(spa) if spa else '(无)',
+             ('  | cut: qpah_err<=%.2f' % args.qpah_err_max) if args.qpah_err_max is not None else ''))
     print('chi2  train=%.4f  test=%.4f  all=%.4f' % (c2_tr, c2_te, c2_all))
     print('pull(all) 中位=%+.4f  std=%.4f  [p16=%+.3f p84=%+.3f]'
           % (pm_all, ps_all, np.percentile(chi, 16), np.percentile(chi, 84)))
