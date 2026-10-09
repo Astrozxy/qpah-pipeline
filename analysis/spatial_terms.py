@@ -40,6 +40,7 @@ ARCSEC_PER_KPC = 206265.0 / 744.0
 
 
 def spatial(ra, dec):
+    """返回 (R, x_major, y_minor)，单位 kpc。x 沿长轴(PA 方向)，y 沿短轴(去投影)。"""
     dx = (ra - RA0) * np.cos(np.radians(DEC0)); dy = dec - DEC0
     x = dx * np.cos(PA) + dy * np.sin(PA)
     y = (-dx * np.sin(PA) + dy * np.cos(PA)) / np.cos(INC)
@@ -83,7 +84,7 @@ def main():
     y = d['qpah'][sel].astype(float)
     sig = np.sqrt(d['qpah_err'][sel].astype(float) ** 2 + args.err_floor ** 2)
     n = len(y)
-    R, yx, xx = spatial(ra, dec)
+    R, X_MAJ, Y_MIN = spatial(ra, dec)   # 长轴 / 短轴（此前变量名写反了）
 
     region = None
     if args.mask_npz:
@@ -106,10 +107,10 @@ def main():
     SETS = [
         ('A  base(4)',        [Zlog],                    5),
         ('B  base+R',         [Zlog, R[:, None]],        6),
-        ('C  base+R+y',       [Zlog, R[:, None], yx[:, None]], 7),
-        ('D  base+R+y+x',     [Zlog, R[:, None], yx[:, None], xx[:, None]], 8),
+        ('C  base+R+y(短轴/南北)', [Zlog, R[:, None], Y_MIN[:, None]], 7),
+        ('D  base+R+y+x',     [Zlog, R[:, None], Y_MIN[:, None], X_MAJ[:, None]], 8),
         ('E  base+logR',      [Zlog, logR[:, None]],     6),
-        ('F  base+logR+y+x',  [Zlog, logR[:, None], yx[:, None], xx[:, None]], 8),
+        ('F  base+logR+y+x',  [Zlog, logR[:, None], Y_MIN[:, None], X_MAJ[:, None]], 8),
     ]
     n_eff = n / 7.02
     print('样本 n=%d | 有效独立 ≈%.0f | 每参数有效样本（5 参数时）≈ %.0f'
@@ -184,7 +185,7 @@ def main():
     print()
     for nm in ['B  base+R', 'C  base+R+y', 'D  base+R+y+x']:
         out, p, _ = res[nm]
-        cols = BASE_FEATS + ['R', 'y', 'x', 'logR']
+        cols = BASE_FEATS + ['R', 'y_minor', 'x_major', 'logR']
         print('%s: 截距=%+.3f | ' % (nm, out['coef'][0]) +
               '  '.join('%s=%+.3f' % (c, v) for c, v in zip(cols[:p - 1], out['coef'][1:])))
 
