@@ -24,8 +24,8 @@ RA0, DEC0, INC, PA = 10.6847, 41.2690, np.radians(77.7), np.radians(37.7)
 
 def spatial(ra, dec):
     dx = (ra - RA0) * np.cos(np.radians(DEC0)); dy = dec - DEC0
-    x = dx * np.cos(PA) + dy * np.sin(PA)
-    y = (-dx * np.sin(PA) + dy * np.cos(PA)) / np.cos(INC)
+    x = dx * np.sin(PA) + dy * np.cos(PA)
+    y = (-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)
     k = 3600.0 / (206265.0 / 744.0)
     R = np.sqrt(x ** 2 + y ** 2) * k
     return {'R': R, 'x': x * k, 'y': y * k, 'logR': np.log10(R + 0.1)}

@@ -40,8 +40,8 @@ def deprojected_radius_kpc(ra, dec):
     """去投影（盘面）半径，单位 kpc。"""
     dx = (ra - RA0) * np.cos(np.radians(DEC0))
     dy = dec - DEC0
-    x = dx * np.cos(PA) + dy * np.sin(PA)          # 长轴
-    y = -dx * np.sin(PA) + dy * np.cos(PA)         # 短轴
+    x = dx * np.sin(PA) + dy * np.cos(PA)          # 长轴
+    y = -dx * np.cos(PA) + dy * np.sin(PA)         # 短轴
     y /= np.cos(INC)
     return np.sqrt(x ** 2 + y ** 2) * 3600.0 / ARCSEC_PER_KPC
 

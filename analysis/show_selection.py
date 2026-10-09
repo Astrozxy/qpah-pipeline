@@ -99,8 +99,8 @@ def main():
 
     # ---- 径向构成 ----
     dx = (ra - RA0) * np.cos(np.radians(DEC0)); dy = dec - DEC0
-    X = dx * np.cos(PA) + dy * np.sin(PA)
-    Y = (-dx * np.sin(PA) + dy * np.cos(PA)) / np.cos(INC)
+    X = dx * np.sin(PA) + dy * np.cos(PA)
+    Y = (-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)
     R = np.sqrt(X ** 2 + Y ** 2) * 3600.0 / (206265.0 / 744.0)
     print('=== 径向构成（检查训练/测试是否均衡）===')
     print('  %-10s %10s %10s %8s | %10s %10s' %

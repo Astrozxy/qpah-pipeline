@@ -90,8 +90,8 @@ def main():
         aux['cov_' + f_] = cv[iy, ix].astype(np.float32)
         aux['edge_' + f_] = ndimage.distance_transform_edt(foot)[iy, ix].astype(np.float32)
     dx = (ra - RA0) * np.cos(np.radians(DEC0)); dy = dec - DEC0
-    X = dx * np.cos(PA) + dy * np.sin(PA)
-    Y = (-dx * np.sin(PA) + dy * np.cos(PA)) / np.cos(INC)
+    X = dx * np.sin(PA) + dy * np.cos(PA)
+    Y = (-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)
     kk = 3600.0 / (206265.0 / 744.0)
     aux['R_kpc'] = (np.sqrt(X ** 2 + Y ** 2) * kk).astype(np.float32)
     aux['x_major_kpc'] = (X * kk).astype(np.float32)

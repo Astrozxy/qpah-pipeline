@@ -42,8 +42,8 @@ ARCSEC_PER_KPC = 206265.0 / 744.0
 def spatial(ra, dec):
     """返回 (R, x_major, y_minor)，单位 kpc。x 沿长轴(PA 方向)，y 沿短轴(去投影)。"""
     dx = (ra - RA0) * np.cos(np.radians(DEC0)); dy = dec - DEC0
-    x = dx * np.cos(PA) + dy * np.sin(PA)
-    y = (-dx * np.sin(PA) + dy * np.cos(PA)) / np.cos(INC)
+    x = dx * np.sin(PA) + dy * np.cos(PA)
+    y = (-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)
     k = 3600.0 / ARCSEC_PER_KPC
     return np.sqrt(x ** 2 + y ** 2) * k, x * k, y * k
 

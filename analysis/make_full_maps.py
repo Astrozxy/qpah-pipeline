@@ -38,8 +38,8 @@ ARCSEC_PER_KPC = 206265.0 / 744.0
 def spatial_terms(ra, dec, which):
     """去投影空间项（与 spatial_terms.py / arm_* 脚本同一套几何）。"""
     dx = (ra - RA0) * np.cos(np.radians(DEC0)); dy = dec - DEC0
-    x = (dx * np.cos(PA) + dy * np.sin(PA)) * 3600.0 / ARCSEC_PER_KPC
-    y = ((-dx * np.sin(PA) + dy * np.cos(PA)) / np.cos(INC)) * 3600.0 / ARCSEC_PER_KPC
+    x = (dx * np.sin(PA) + dy * np.cos(PA)) * 3600.0 / ARCSEC_PER_KPC
+    y = ((-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)) * 3600.0 / ARCSEC_PER_KPC
     R = np.sqrt(x ** 2 + y ** 2)
     pool = {'x': x, 'y': y, 'R': R, 'logR': np.log10(R + 0.1)}
     return [pool[w] for w in which]
