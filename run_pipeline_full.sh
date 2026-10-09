@@ -7,11 +7,11 @@
 #   1 make_co_maps            (cube -> I_CO + sigma_I)
 #   2 align_maps              (exact block 到 qPAH 网格; 重建 CO/CO_sigma/CO_det 缓存)
 #   3 build_dataset full
-#   4 train_co_alternate full (Stage-1 -> 2a -> 2b; 输出 results/coalt_full/)
+#   4 train_co_alternate full (Stage-1 + 2a/2b 交替固定轮数; 输出 results/coalt_full/)
 #   5 predict_grid coalt_full (读 results/coalt_full/model.pth 预测全网格)
 #   6 interpret coalt_full    (解释图，基于交替优化模型)
 #   7 plot_galaxy_map coalt_full (全样本 RA-Dec obs/pred/chi 三面板)
-#   8 render_pred_maps coalt_full (全网格 pred + chi PNG)
+#   8 render_pred_maps coalt_full (全网格 pred + resid + chi PNG)
 #   9 plot_co_update_map coalt_full (CO 更新前/后对比图)
 set -euo pipefail
 

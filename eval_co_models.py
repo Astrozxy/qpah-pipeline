@@ -43,6 +43,9 @@ def main():
     ap.add_argument('--tag', default='coalt_full', help='用该 tag 的 scale.json')
     ap.add_argument('--h5', default='data/M31_1d_array_full.h5')
     ap.add_argument('--err-floor', type=float, default=0.2)
+    ap.add_argument('--clip-co-neg', action='store_true',
+                    help='输入时把 CO 裁剪到 ≥0（需与训练一致；--no-co-update 基线用）')
+    ap.add_argument('--label', default='', help='输出表头/文件名用的标签')
     args = ap.parse_args()
 
     with h5py.File(args.h5, 'r') as f:
@@ -51,6 +54,8 @@ def main():
            & (d['H1'] >= 0) & (d['H1_ew'] >= 0)
            & np.isfinite(d['CO']) & np.isfinite(d['CO_sigma']) & (d['CO_sigma'] > 0))
     X = np.column_stack([d[k][sel] for k in FEAT]).astype(np.float32)
+    if args.clip_co_neg:                 # FEAT 里 CO 是第 4 列（index 3）
+        X[:, 3] = np.maximum(X[:, 3], 0.0)
     y = d['qpah'][sel].astype(np.float32)
     ye = d['qpah_err'][sel].astype(np.float32)
     ra, dec = d['ra'][sel], d['dec'][sel]

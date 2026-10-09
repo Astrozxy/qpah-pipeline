@@ -34,21 +34,31 @@ python qpah_pipeline/interpret.py --selection full --tag coalt_full
 
 - `--selection full`：全盘（主数据集）：coverage 齐全像素，无 AGB 阈值。
 - `--selection agb`：AGB≥3 且剔除 M32（构建较慢，需 AGB 星表；交替训练 tag 默认 `coalt_agb`）。
-- 交替训练三段式（`train_co_alternate.py`）：
-  1. **Stage-1** 只用 CO/σ>3 探测像素训练 MLP（等权 Pseudo-Huber δ=10，CO=测量值）；
-  2. **Stage-2a** 冻结模型，只更新全部像素的 CO_true（高斯先验 + CO_true≥0）；
-  3. **Stage-2b** 联合小步微调模型参数与 CO_true（CO 先验始终保留）。
-- 验证/测试一律用测量 CO，用于选模型与最终指标。
+- 交替训练（`train_co_alternate.py`）——**没有 val，全部固定轮数**：
+  1. **Stage-1** 只用 CO/σ>3 探测像素训练 MLP，跑满 `--stage1-epochs`（默认 500）；
+  2. **Stage-2a** 冻结模型，只更新训练像素的 CO_true（高斯先验 + CO_true≥0）；
+  3. **Stage-2b** 联合微调模型参数与 CO_true，跑满 `--joint-epochs`（默认 100）。
+  2a↔2b 交替 `--alt-rounds` 轮（默认 5；第 1 轮 CO_true 初值=测量 CO，之后 warm start）。
+  **最终模型 = 末轮末态**（事先约定，不做任何选优）。
+- **口径：10 个方位扇区 → 6 训练 / 4 空间测试**。训练扇区**全部像素**进迭代，不切 val、
+  不早停、不选模型；空间测试扇区不参与训练与任何训练期判断，只在最后评估 + 画图。
+  每轮的 CO_true 快照存进 `co_true_train.npz`（`co_true_s2a` / `co_true_s2b`，形状 (R,N)），
+  每轮的模型+CO_true 配对另存 `model_round<r>.pth` / `co_true_round<r>.npy`（仅事后诊断）。
 
 ## 输出
 
 ```
 results/coalt_full/
 ├── model_stage1.pth / model.pth / scale.json / train.json
-├── co_true_train.npz                        (CO_true 诊断 + Fisher/sigma_post)
-├── fig_galaxy_map.png/.pdf                  (obs / pred / chi 三面板)
+├── model_round<r>.pth / co_true_round<r>.npy (每轮配对快照，仅事后诊断)
+├── co_true_final.npy                        (与 model.pth 配对的最终 CO_true)
+├── co_true_train.npz                        (CO_true 诊断 + Fisher/sigma_post
+│                                             + 每轮快照 co_true_s2a/s2b)
+├── fig_galaxy_map.png/.pdf                  (obs / pred / 残差 三面板；残差面板默认 χ，
+│                                             加 --resid-mode abs 换成绝对残差 pred-obs)
 ├── fig_co_update_map.png/.pdf               (CO 更新前/后 + dCO + 显著性)
 ├── fig_pred_map_<tag>.png                   (全网格预测)
+├── fig_resid_map_<tag>.png                  (全网格绝对残差 pred-obs，qPAH 百分点)
 ├── fig_chi_map_<tag>.png                    (全网格 chi)
 └── fig_interpret_*.png                      (interpret.py)
 data/qpah_pred_map_<tag>.fits / qpah_pred_resid_map_<tag>.fits / qpah_chi_map_<tag>.fits
@@ -57,7 +67,9 @@ data/qpah_pred_map_<tag>.fits / qpah_pred_resid_map_<tag>.fits / qpah_chi_map_<t
 **评估口径（重要）**：qPAH 观测误差是**逐像素异方差**的，因此本流程**不计算 MSE/RMSLE**。
 拟合质量用 `chi2_red = mean(pull^2)`（理想值 1）与 pull 分布（理想 med 0 / std 1）判断，
 其中 `pull = (pred - obs)/sigma_eff`，`sigma_eff = sqrt(qpah_err^2 + err_floor^2)`。
-同理，所有残差图都画成相对误差 `chi`，而非绝对残差。
+**判断拟合好坏一律用 χ（相对误差）**——绝对残差 `pred-obs` 的幅度被高 σ_eff 像素主导，
+低误差像素的 1σ 会被视觉压平，不能当拟合优度判据。
+（绝对残差图仍会输出，作为"哪里错得最多、错多少"的物理诊断，与 χ 图互补。）
 
 **CO 交替更新**：Stage-1 只用 CO/σ>3 像素训练（假设观测=真值）→ Stage-2a 冻结模型、
 以 CO 观测为先验反推**全部训练扇区像素**的 `c_true` → Stage-2b 用 `c_true` 训练并与模型联合微调。

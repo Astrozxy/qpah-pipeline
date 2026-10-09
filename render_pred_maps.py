@@ -1,18 +1,21 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-render_pred_maps.py — 把 predict_grid.py 输出的全网格预测 / χ FITS 渲染成 PNG。
+render_pred_maps.py — 把 predict_grid.py 输出的全网格预测 / 残差 / χ FITS 渲染成 PNG。
 
 用法:
-    python render_pred_maps.py --tag coalt_full
+    python render_pred_maps.py --tag coalt_full [--resid-vmax 3]
 读取:
-    data/qpah_pred_map_<tag>.fits, data/qpah_chi_map_<tag>.fits
+    data/qpah_pred_map_<tag>.fits, data/qpah_pred_resid_map_<tag>.fits,
+    data/qpah_chi_map_<tag>.fits
 输出:
     results/<tag>/fig_pred_map_<tag>.png
-    results/<tag>/fig_chi_map_<tag>.png
+    results/<tag>/fig_resid_map_<tag>.png     (绝对残差 pred−obs，qPAH 百分点)
+    results/<tag>/fig_chi_map_<tag>.png        (χ = (pred−obs)/σ_eff)
 
-注：χ = (pred − obs)/σ_eff（σ_eff=sqrt(qpah_err²+floor²)）。
-qPAH 观测误差是逐像素异方差的，因此不再画绝对残差图。
+注：χ = (pred − obs)/σ_eff（σ_eff=sqrt(qpah_err²+floor²)），用于判断拟合优度
+（观测误差逐像素异方差）；绝对残差 pred−obs 物理尺度直观、能看出"哪里错得最多"，
+但幅度被高 σ_eff 像素主导，不能当拟合判据。两张图互补，都出。
 """
 import os, argparse
 os.environ.setdefault('MPLCONFIGDIR', '/tmp/mplconfig')
@@ -61,6 +64,10 @@ def main():
     ap.add_argument('--pred-vmax', type=float, default=6.0)
     ap.add_argument('--chi-vmin', type=float, default=-3.0)
     ap.add_argument('--chi-vmax', type=float, default=3.0)
+    ap.add_argument('--resid-vmax', type=float, default=3.0,
+                    help='绝对残差图对称色标上限（±vmax，qPAH 百分点）')
+    ap.add_argument('--skip-resid', action='store_true',
+                    help='不渲染绝对残差图（默认渲染）')
     args = ap.parse_args()
 
     outdir = os.path.join(RESULTS, args.tag)
@@ -78,6 +85,18 @@ def main():
            r'$\chi=(\mathrm{pred}-\mathrm{obs})/\sigma_{\rm eff}$  [%s]' % args.tag,
            'RdBu_r', args.chi_vmin, args.chi_vmax,
            cbar_label=r'$\chi$   ($\sigma_{\rm eff}$)')
+
+    resid_fits = os.path.join(DATA, 'qpah_pred_resid_map_%s.fits' % args.tag)
+    if args.skip_resid:
+        print('skip resid map (--skip-resid)')
+    elif not os.path.exists(resid_fits):
+        print('skip resid map: 缺 %s（先跑 predict_grid.py --tag %s）'
+              % (resid_fits, args.tag))
+    else:
+        render(resid_fits, os.path.join(outdir, 'fig_resid_map_%s.png' % args.tag),
+               r'$\mathrm{pred}-\mathrm{obs}$  ($q_{\rm PAH}$ %%)  [%s]' % args.tag,
+               'RdBu_r', -args.resid_vmax, args.resid_vmax,
+               cbar_label=r'$\mathrm{pred}-\mathrm{obs}$   (%)')
     print('ALL DONE')
 
 

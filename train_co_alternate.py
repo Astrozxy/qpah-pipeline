@@ -1,25 +1,33 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-train_co_alternate.py — CO forward-modelling 三段式训练（Stage-1 / 2a / 2b）。
+train_co_alternate.py — CO forward-modelling 交替训练（Stage-1 + Stage-2a/2b × N 轮）。
 
 数据集要求：build_dataset.py 新版产物（data/M31_1d_array_full.h5 或 agb，
 含 CO_sigma / CO_det 列）。
 
-流程：
-  Stage-1 : 只用 CO/CO_sigma > 3 的探测像素训练 MLP（异方差 Pseudo-Huber：
-            σ_eff=sqrt(qpah_err²+floor²)，CO 固定为测量值；--no-err-weight 回退等权）；
-  Stage-2a: 放开全部（含非探测）像素，冻结模型，只更新每像素 CO_true
-            （全部像素都带高斯先验 (CO_true−CO_meas)²/σ²，CO_true≥0）；
-  Stage-2b: 同时放开模型参数与 CO_true，用小学习率联合微调，
-            CO 先验项始终保留在 loss 里防 CO 漂移。
-验证/测试一律用测量 CO（不更新 CO），用于选模型与最终指标。
+口径（现行，2026-10 起）：**没有 val**。
+  - 10 个方位扇区 → 6 个训练扇区 / 4 个【空间测试扇区】；
+  - 训练扇区【全部像素】进迭代优化，**不切 val、不早停、不选模型**；
+  - 空间测试扇区完全不参与训练、也不参与任何训练期判断，只在最后评估 + 画图。
+
+流程（全部固定轮数，预先约定，训练中不看任何留出数据）：
+  Stage-1 : 只用 CO/CO_sigma > 3 的探测像素训练 MLP，跑满 --stage1-epochs
+            （异方差 Pseudo-Huber：σ_eff=sqrt(qpah_err²+floor²)，CO 固定为测量值；
+             --no-err-weight 回退等权）；
+  Stage-2 : 【交替优化】重复 --alt-rounds 轮，每轮做两步：
+      2a: 冻结模型，只更新每像素 CO_true（高斯先验 (CO_true−CO_meas)²/σ²，CO_true≥0）；
+      2b: 同时放开模型参数与 CO_true，联合微调，CO 先验始终保留防漂移。
+  第 1 轮 CO_true 初值 = 测量 CO；之后 warm start（拿上一轮末态继续）。
+  每轮末存 model_round<r>.pth + co_true_round<r>.npy（仅事后诊断）。
+  最终模型 = 末轮末态（预先约定，不做任何选优）。
 
 用法:
   python train_co_alternate.py --selection full
   python train_co_alternate.py --selection agb --tag coalt_agb
 
-输出: results/<tag>/{model_stage1.pth, model.pth, scale.json, train.json}
+输出: results/<tag>/{model_stage1.pth, model.pth, co_true_final.npy, scale.json,
+                    train.json, co_true_train.npz, model_round<r>.pth, ...}
 """
 import os, time, json, argparse
 import numpy as np
@@ -27,7 +35,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
-from sklearn.model_selection import train_test_split
 import h5py
 
 REPO = os.path.dirname(os.path.abspath(__file__))
@@ -119,19 +126,22 @@ def load_h5(h5path):
     return out
 
 
-def sector_split(ds, n_sectors=10, train_frac=0.6, val_frac=0.2, seed=0):
-    """按方位角分 n_sectors 个扇区，取 train_frac 作训练扇区，其余作测试扇区。"""
+def sector_split(ds, n_sectors=10, train_frac=0.6, seed=0):
+    """按方位角分 n_sectors 个扇区：取 train_frac 作训练扇区，其余作【空间测试扇区】。
+
+    注意（现行口径）：**不再从训练扇区里切 val**。训练扇区的全部像素都进迭代优化；
+    空间测试扇区完全不参与训练、也不参与任何训练期判断（无早停、无选模型），
+    只在最后做评估与画图。
+    """
     ang = np.arctan2(ds['dec'] - 41.25, ds['ra'] - 10.75)
     ang = (ang + 2 * np.pi) % (2 * np.pi)
     sec = np.digitize(ang, np.linspace(0, 2 * np.pi, n_sectors + 1)) - 1
     n_tr = int(round(n_sectors * train_frac))
     tr = np.random.choice(np.arange(n_sectors), size=n_tr, replace=False)
     te = np.setdiff1d(np.arange(n_sectors), tr)
-    train_full = np.where(np.isin(sec, tr))[0]
+    train_idx = np.where(np.isin(sec, tr))[0]
     test_idx = np.where(np.isin(sec, te))[0]
-    train_idx, val_idx = train_test_split(train_full, test_size=val_frac,
-                                          random_state=seed)
-    return tr, te, train_idx, val_idx, test_idx
+    return tr, te, train_idx, test_idx
 
 
 def main():
@@ -149,16 +159,30 @@ def main():
     ap.add_argument('--tag', default=None)
     ap.add_argument('--snr-thresh', type=float,
                     default=cfg_get(cfg, 'data', 'snr_thresh', default=3.0))
+    ap.add_argument('--no-co-update', action='store_true',
+                    help='完全不允许 CO 更新：跳过 Stage-2（不做 CO 反推/联合微调），'
+                         '最终模型 = Stage-1 模型（纯监督基线）')
+    ap.add_argument('--clip-co-neg', action='store_true',
+                    help='输入时把 CO 观测裁剪到 ≥0（max(CO,0)）：负 CO 不物理，'
+                         '且 Stage-1 只在正 CO 上训练过。裁剪会同时作用于标准化/训练/评估')
     ap.add_argument('--stage1-epochs', type=int,
-                    default=cfg_get(cfg, 'stage1', 'epochs', default=300))
+                    default=cfg_get(cfg, 'stage1', 'epochs', default=500),
+                    help='Stage-1 固定轮数（无 val 早停，跑满）')
+    ap.add_argument('--stage1-ckpt-every', type=int, default=0,
+                    help='Stage-1 快照间隔（epoch；0 = 用 stage1_epochs//10），'
+                         '快照存 results/<tag>/stage1_ckpt/，供事后逐 epoch 诊断')
     ap.add_argument('--stage1-lr', type=float,
                     default=cfg_get(cfg, 'stage1', 'lr', default=0.01))
     ap.add_argument('--co-only-steps', type=int,
                     default=cfg_get(cfg, 'stage2', 'co_only_steps', default=1000))
+    ap.add_argument('--alt-rounds', type=int,
+                    default=cfg_get(cfg, 'stage2', 'alt_rounds', default=5),
+                    help='Stage-2 交替优化轮数（每轮 = 2a 更新 CO_true + 2b 联合微调）')
     ap.add_argument('--co-lr', type=float,
                     default=cfg_get(cfg, 'stage2', 'co_lr', default=1e-3))
     ap.add_argument('--joint-epochs', type=int,
-                    default=cfg_get(cfg, 'stage2', 'joint_epochs', default=200))
+                    default=cfg_get(cfg, 'stage2', 'joint_epochs', default=100),
+                    help='每轮 2b 的固定轮数（无 val 早停，跑满）')
     ap.add_argument('--joint-model-lr', type=float,
                     default=cfg_get(cfg, 'stage2', 'joint_model_lr', default=1e-4))
     ap.add_argument('--joint-co-lr', type=float,
@@ -192,7 +216,6 @@ def main():
     seed = int(cfg_get(cfg, 'split', 'random_state', default=0))
     n_sectors = int(cfg_get(cfg, 'split', 'n_sectors', default=10))
     train_frac = float(cfg_get(cfg, 'split', 'train_sector_frac', default=0.6))
-    val_frac = float(cfg_get(cfg, 'split', 'val_frac_of_train', default=0.2))
     hidden = tuple(args.hidden)
     dropout = float(args.dropout)
     s1_step = int(cfg_get(cfg, 'stage1', 'sched_step', default=100))
@@ -200,8 +223,6 @@ def main():
     s1_rebalance_by = str(args.rebalance_by)
     s1_nbins = int(args.n_bins)
     cap_factor = float(cfg_get(cfg, 'stage1', 'weight_cap_factor', default=2.0))
-    s1_eval_every = int(cfg_get(cfg, 'stage1', 'eval_every', default=20))
-    s1_patience = int(cfg_get(cfg, 'stage1', 'patience', default=10))
     clamp_min = float(cfg_get(cfg, 'stage2', 'clamp_min', default=0.0))
 
     tag = args.tag or ('coalt_' + args.selection)
@@ -211,8 +232,9 @@ def main():
     print('device:', device, flush=True)
     log('config: %s' % (cfg_path if cfg_path and os.path.exists(cfg_path)
                         else '(未找到 %s，使用内置默认值)' % cfg_path))
-    log('model: hidden=%s dropout=%.2f | split: %d sectors, train_frac=%.2f, val_frac=%.2f, seed=%d'
-        % (list(hidden), dropout, n_sectors, train_frac, val_frac, seed))
+    log('model: hidden=%s dropout=%.2f | split: %d sectors, train_frac=%.2f, seed=%d '
+        '(无 val：训练扇区全部像素进迭代)'
+        % (list(hidden), dropout, n_sectors, train_frac, seed))
     set_seed(seed)
     h5path = args.dataset or os.path.join(DATA, SEL_FILE[args.selection])
     ds = load_h5(h5path)
@@ -229,7 +251,13 @@ def main():
     # sig_eff ：loss 用的 σ（--no-err-weight 时退化为等权 =1）
     sig_eval = np.sqrt(qpah_err ** 2 + args.err_floor ** 2)
     sig_eff = sig_eval if not args.no_err_weight else np.ones_like(qpah_err)
-    co_meas = ds['CO'].astype(np.float32)
+    co_meas_raw = ds['CO'].astype(np.float32)
+    if args.clip_co_neg:
+        co_meas = np.maximum(co_meas_raw, 0.0)
+        log('--clip-co-neg: CO 输入裁剪到 ≥0（负观测 %d px = %.1f%% 被置 0）'
+            % (int((co_meas_raw < 0).sum()), 100.0 * (co_meas_raw < 0).mean()))
+    else:
+        co_meas = co_meas_raw
     co_sig = np.maximum(ds['CO_sigma'].astype(np.float32), 1e-6)
     det = (co_meas / co_sig) > args.snr_thresh
     log('detection(CO/σ>%.0f): %d / %d (%.1f%%)'
@@ -246,11 +274,13 @@ def main():
                'model_hidden': list(hidden), 'model_dropout': dropout},
               open(os.path.join(outdir, 'scale.json'), 'w'), indent=1)
 
-    tr_s, te_s, train_idx, val_idx, test_idx = sector_split(
-        ds, n_sectors=n_sectors, train_frac=train_frac,
-        val_frac=val_frac, seed=seed)
+    tr_s, te_s, train_idx, test_idx = sector_split(
+        ds, n_sectors=n_sectors, train_frac=train_frac, seed=seed)
     log('train sectors %s | test sectors %s' % (tr_s, te_s))
-    log('train/val/test:', len(train_idx), len(val_idx), len(test_idx))
+    log('train/test:', len(train_idx), len(test_idx),
+        '（空间测试扇区不参与训练，只在最后评估+画图）')
+    log('CO/σ>%.0f 探测像素: 训练扇区 %d | 测试扇区 %d（后者不再进入 Stage-1）'
+        % (args.snr_thresh, int(det[train_idx].sum()), int(det[test_idx].sum())))
 
     Xt = torch.tensor(Xn, dtype=torch.float32).to(device)
     yt = torch.tensor(y, dtype=torch.float32).to(device)
@@ -265,24 +295,18 @@ def main():
         X[:, 3] = c
         return X if idx is None else X[idx]
 
-    def val_loss(model):
-        model.eval()
-        with torch.no_grad():
-            r = (model(build_X(co_m, val_idx)) - yt[val_idx]) / se_t[val_idx]
-            return torch.mean(phuber(r, args.huber_delta)).item()
-
-    # ============ Stage-1: CO>3σ 子集训练 ============
-    log('Stage-1: train on CO/σ>%.0f pixels (n=%d) ...' % (args.snr_thresh, det.sum()))
-    log('  stage1 early-stop: eval_every=%d patience=%d（val 先降后升，必须早停）'
-        % (s1_eval_every, s1_patience))
-    best_s1, best_s1_ep, bad_s1 = float('inf'), -1, 0
+    # ============ Stage-1: CO>3σ 子集训练（固定轮数，无早停/无 val） ============
+    log('Stage-1: train on CO/σ>%.0f pixels【仅训练扇区】(n=%d), 固定 %d epochs ...'
+        % (args.snr_thresh, int(det[train_idx].sum()), args.stage1_epochs))
     model = MLPRegressor(hidden=hidden, dropout=dropout).to(device)
     log('  weight_decay=%.1e | ||W|| init=%.3f | hidden=%s'
         % (args.weight_decay, model_norm(model), list(hidden)))
     opt1 = optim.Adam(model.parameters(), lr=args.stage1_lr,
                       weight_decay=args.weight_decay)
     sch1 = optim.lr_scheduler.StepLR(opt1, step_size=s1_step, gamma=s1_gamma)
-    idx1 = np.where(det)[0]
+    # 只在【训练扇区】内取探测像素 —— 否则测试扇区像素会漏进 Stage-1 训练
+    # （原实现是 idx1 = np.where(det)[0]，会把测试扇区的 3737 个探测像素也拿来训练）
+    idx1 = train_idx[det[train_idx]]
     yy1 = y[idx1]
     co1 = co_meas[idx1]
     cnt = np.array([-1])
@@ -322,6 +346,10 @@ def main():
                                      num_samples=len(idx1), replacement=True)
     loader1 = DataLoader(TensorDataset(Xt[idx1], yt[idx1], se_t[idx1]),
                          batch_size=args.batch_size, sampler=sampler1)
+    s1_every = (args.stage1_ckpt_every if args.stage1_ckpt_every > 0
+                else max(1, args.stage1_epochs // 10))
+    ckpt_dir = os.path.join(outdir, 'stage1_ckpt')
+    os.makedirs(ckpt_dir, exist_ok=True)
     for ep in range(args.stage1_epochs):
         model.train()
         tot = 0.0
@@ -332,41 +360,27 @@ def main():
             opt1.step()
             tot += loss.item() * bx.size(0)
         sch1.step()
-        # 用验证集选最优 Stage-1 模型 + 早停（训练 loss 会一直降，但 val 会先降后升）
-        if (ep + 1) % s1_eval_every == 0 or ep == args.stage1_epochs - 1:
-            tr_now = tot / len(idx1)
-            vl = val_loss(model)
-            if vl < best_s1:
-                best_s1, best_s1_ep, bad_s1 = vl, ep + 1, 0
-                torch.save(model.state_dict(), os.path.join(outdir, 'model_stage1.pth'))
-            else:
-                bad_s1 += 1
-            log('  S1 ep %4d tr=%.4f val=%.4f best=%.4f@%d'
-                % (ep + 1, tr_now, vl, best_s1, best_s1_ep))
-            if s1_patience > 0 and bad_s1 >= s1_patience:
-                log('  S1 early stop @ep%d（连续 %d 次评估无改善）' % (ep + 1, bad_s1))
-                break
-        elif (ep + 1) % 100 == 0:
+        # 无 val：不再选模型/早停，固定轮数跑完；只打印训练 loss 轨迹供事后检查
+        if (ep + 1) % s1_every == 0 or (ep + 1) == args.stage1_epochs:
             log('  S1 ep %4d tr=%.4f' % (ep + 1, tot / len(idx1)))
-    if best_s1_ep < 0:
-        torch.save(model.state_dict(), os.path.join(outdir, 'model_stage1.pth'))
-    else:
-        model.load_state_dict(torch.load(os.path.join(outdir, 'model_stage1.pth'),
-                                         map_location=device, weights_only=True))
-        log('Stage-1: reloaded best @ep%d (val=%.4f)' % (best_s1_ep, best_s1))
-    v1 = val_loss(model)
-    log('Stage-1 val (meas CO): %.4f  ||W||=%.3f  (best_ep=%d)'
-        % (v1, model_norm(model), best_s1_ep))
+            # 存 epoch 快照，供事后（含测试扇区）逐 epoch 诊断 —— 训练本身不看测试
+            torch.save(model.state_dict(),
+                       os.path.join(ckpt_dir, 'model_stage1_ep%04d.pth' % (ep + 1)))
+    torch.save(model.state_dict(), os.path.join(outdir, 'model_stage1.pth'))
+    log('Stage-1 done (%d epochs, 末态保存为 model_stage1.pth)  ||W||=%.3f'
+        % (args.stage1_epochs, model_norm(model)))
 
-    # ============ Stage-2a: 冻结模型，只更新 CO_true（全像素，带先验） ============
-    # CO_true 只对训练像素优化（val/test 一律用测量 CO，避免泄漏）
+    # ============ Stage-2: 交替优化（2a ↔ 2b），共 --alt-rounds 轮 ============
+    # 交替坐标下降：每轮先冻结模型、只更新 CO_true（2a），再联合微调模型+CO_true（2b）。
+    # 2b 改完模型后 2a 的最优性就失效了，所以要再交替回去 —— 这正是多轮的意义。
+    # 第 1 轮 2a 的初值 = 测量 CO；第 r>1 轮以上一轮 2b 的 CO_true 为初值（warm start）。
+    # CO_true 只对训练像素更新（val/test 一律用测量 CO，避免泄漏）。
     co_true = nn.Parameter(co_m[train_idx].clone())
     Xtr = Xt[train_idx]
     ytr = yt[train_idx]
     co_meas_tr = co_m[train_idx]
     co_sig_tr = co_s[train_idx]
     se_tr = se_t[train_idx]
-    opt_co = optim.Adam([co_true], lr=args.co_lr)
 
     def co_loss_parts():
         """返回 (qPAH 数据项, CO 先验项)；先验项未乘 0.5·λ。"""
@@ -380,60 +394,123 @@ def main():
         q, pr = co_loss_parts()
         return q + 0.5 * args.prior_lambda * pr
 
-    log('Stage-2a: freeze model, update CO_true (all pixels) %d steps...'
-        % args.co_only_steps)
-    model.eval()
-    for k in range(args.co_only_steps):
-        opt_co.zero_grad()
-        loss = co_loss_full()
-        loss.backward()
-        opt_co.step()
+    def co_stats(tag):
+        """打印 CO_true 相对【测量值】的分布（衡量总共动了多少）。"""
         with torch.no_grad():
-            co_true.data.clamp_(min=clamp_min)
-        if (k + 1) % 10 == 0:
-            with torch.no_grad():
-                q_now, pr_now = co_loss_parts()
-            log('  S2a step %3d loss=%.4f (data=%.4f prior=%.4f)  CO_true med=%.3f'
-                % (k + 1, loss.item(), q_now.item(),
-                   0.5 * args.prior_lambda * pr_now.item(),
-                   co_true.detach().median().item()))
+            c_np = co_true.detach().cpu().numpy().astype(np.float64)
+            pull = (c_np - co_meas_tr.detach().cpu().numpy()) / \
+                co_sig_tr.detach().cpu().numpy()
+            n_at0 = int((c_np <= 1e-9).sum())
+        log('  %s CO_true: med=%.3f p16=%.3f p84=%.3f | (CO_true-CO_meas)/sigma: '
+            'med=%+.2f std=%.2f | clamp0=%.1f%%'
+            % (tag, np.median(c_np), np.percentile(c_np, 16), np.percentile(c_np, 84),
+               np.median(pull), np.std(pull), 100.0 * n_at0 / len(c_np)))
 
-    # ============ Stage-2b: 联合微调（模型 + CO_true 小步幅） ============
-    log('Stage-2b: joint fine-tune (%d epochs, model_lr=%.0e co_lr=%.0e)...'
-        % (args.joint_epochs, args.joint_model_lr, args.joint_co_lr))
-    params = [{'params': model.parameters(), 'lr': args.joint_model_lr,
-               'weight_decay': args.weight_decay},
-              {'params': [co_true], 'lr': args.joint_co_lr, 'weight_decay': 0.0}]
-    opt_j = optim.Adam(params)
-    best = float('inf')
-    best_ep = -1
+    def move_stats(a, b):
+        """|a−b|/σ_CO 的中位/p84/max（a、b 为同长度 device tensor）。"""
+        with torch.no_grad():
+            d = ((a.detach() - b.detach()) / co_sig_tr).cpu().numpy()
+        return (float(np.median(np.abs(d))), float(np.percentile(np.abs(d), 84)),
+                float(np.abs(d).max()))
+
     n_tr = len(train_idx)
-    for ep in range(args.joint_epochs):
-        model.train()
-        order = np.random.permutation(n_tr)
-        tot = 0.0
-        for s in range(0, n_tr, args.batch_size):
-            ib = order[s:s + args.batch_size]
-            Xb = Xtr[ib].clone()
-            Xb[:, 3] = (co_true[ib] - mean[0][3]) / std[0][3]
-            opt_j.zero_grad()
-            q = torch.mean(phuber((model(Xb) - ytr[ib]) / se_tr[ib], args.huber_delta))
-            pr = torch.mean(((co_true[ib] - co_meas_tr[ib]) / co_sig_tr[ib]) ** 2)
-            (q + 0.5 * args.prior_lambda * pr).backward()
-            opt_j.step()
+    s2a_hist, s2b_hist, round_hist = [], [], []   # 每轮 CO_true 快照 / 摘要
+    prev_co = co_true.detach().clone()            # 上一轮结束时的 CO_true
+
+    n_rounds_eff = 0 if args.no_co_update else args.alt_rounds
+    if args.no_co_update:
+        log('--no-co-update: 跳过 Stage-2（完全不允许 CO 更新），最终模型 = Stage-1 模型')
+    for rnd in range(1, n_rounds_eff + 1):
+        log('=' * 22 + ' alternate round %d/%d ' % (rnd, args.alt_rounds) + '=' * 22)
+
+        # ---- 2a: 冻结模型，只更新 CO_true（warm start） ----
+        opt_co = optim.Adam([co_true], lr=args.co_lr)
+        every = max(1, args.co_only_steps // 10)
+        log('Stage-2a: freeze model, update CO_true (%d steps)...' % args.co_only_steps)
+        model.eval()
+        s2a_loss = float('nan')
+        for k in range(args.co_only_steps):
+            opt_co.zero_grad()
+            loss = co_loss_full()
+            loss.backward()
+            opt_co.step()
             with torch.no_grad():
                 co_true.data.clamp_(min=clamp_min)
-            tot += q.item() * len(ib)
-        if (ep + 1) % 20 == 0 or ep == args.joint_epochs - 1:
-            vl = val_loss(model)
-            with torch.no_grad():
-                pr_ep = torch.mean(((co_true - co_meas_tr) / co_sig_tr) ** 2).item()
-            log('  S2b ep %3d tr=%.4f (CO prior=%.4f) val(measCO)=%.4f best=%.4f'
-                % (ep + 1, tot / n_tr, 0.5 * args.prior_lambda * pr_ep, vl, best))
-            if vl < best:
-                best = vl
-                best_ep = ep + 1
-                torch.save(model.state_dict(), os.path.join(outdir, 'model.pth'))
+            s2a_loss = loss.item()
+            if (k + 1) % every == 0 or (k + 1) == args.co_only_steps:
+                with torch.no_grad():
+                    q_now, pr_now = co_loss_parts()
+                log('  R%d S2a step %4d loss=%.4f (data=%.4f prior=%.4f)  CO_true med=%.3f'
+                    % (rnd, k + 1, loss.item(), q_now.item(),
+                       0.5 * args.prior_lambda * pr_now.item(),
+                       co_true.detach().median().item()))
+        mv_prev = move_stats(co_true, prev_co)
+        log('  R%d after-2a: |CO_true - 上一轮结束|/sigma  med=%.3f p84=%.3f max=%.2f'
+            '   (R1 的"上一轮"= 测量 CO 初值)'
+            % (rnd, mv_prev[0], mv_prev[1], mv_prev[2]))
+        co_stats('R%d after-2a' % rnd)
+        s2a_hist.append(co_true.detach().cpu().numpy().astype(np.float32).copy())
+
+        # ---- 2b: 联合微调（模型 + CO_true） ----
+        # 无 val：不做早停、不选模型，固定轮数跑完；只记录训练 loss 轨迹供事后检查
+        log('Stage-2b: joint fine-tune (%d epochs, model_lr=%.0e co_lr=%.0e)...'
+            % (args.joint_epochs, args.joint_model_lr, args.joint_co_lr))
+        params = [{'params': model.parameters(), 'lr': args.joint_model_lr,
+                   'weight_decay': args.weight_decay},
+                  {'params': [co_true], 'lr': args.joint_co_lr, 'weight_decay': 0.0}]
+        opt_j = optim.Adam(params)
+        s2b_every = max(1, args.joint_epochs // 10)
+        ep_tr_hist = []
+        for ep in range(args.joint_epochs):
+            model.train()
+            order = np.random.permutation(n_tr)
+            tot = 0.0
+            for s in range(0, n_tr, args.batch_size):
+                ib = order[s:s + args.batch_size]
+                Xb = Xtr[ib].clone()
+                Xb[:, 3] = (co_true[ib] - mean[0][3]) / std[0][3]
+                opt_j.zero_grad()
+                q = torch.mean(phuber((model(Xb) - ytr[ib]) / se_tr[ib], args.huber_delta))
+                pr = torch.mean(((co_true[ib] - co_meas_tr[ib]) / co_sig_tr[ib]) ** 2)
+                (q + 0.5 * args.prior_lambda * pr).backward()
+                opt_j.step()
+                with torch.no_grad():
+                    co_true.data.clamp_(min=clamp_min)
+                tot += q.item() * len(ib)
+            ep_tr_hist.append(tot / n_tr)
+            if (ep + 1) % s2b_every == 0 or (ep + 1) == args.joint_epochs:
+                with torch.no_grad():
+                    pr_ep = torch.mean(((co_true - co_meas_tr) / co_sig_tr) ** 2).item()
+                log('  R%d S2b ep %4d tr=%.4f (CO prior=%.4f)'
+                    % (rnd, ep + 1, tot / n_tr, 0.5 * args.prior_lambda * pr_ep))
+
+        mv_ab = move_stats(co_true, torch.tensor(s2a_hist[-1], device=device))
+        log('  R%d after-2b: |CO_true(2b末) - CO_true(2a)|/sigma  med=%.3f p84=%.3f max=%.2f'
+            % (rnd, mv_ab[0], mv_ab[1], mv_ab[2]))
+        co_stats('R%d after-2b' % rnd)
+        # 每轮存一个【模型 + CO_true】配对快照，仅作事后诊断
+        # （可用 eval_co_models.py 比较各轮；训练中不使用，测试扇区不参与）
+        torch.save(model.state_dict(), os.path.join(outdir, 'model_round%d.pth' % rnd))
+        np.save(os.path.join(outdir, 'co_true_round%d.npy' % rnd),
+                co_true.detach().cpu().numpy())
+        s2b_hist.append(co_true.detach().cpu().numpy().astype(np.float32).copy())
+        round_hist.append(dict(round=rnd, s2a_loss=float(s2a_loss),
+                               s2b_first_tr=float(ep_tr_hist[0]) if ep_tr_hist else None,
+                               s2b_last_tr=float(ep_tr_hist[-1]) if ep_tr_hist else None,
+                               move_2a_vs_prev_med=float(mv_prev[0]),
+                               move_2b_vs_2a_med=float(mv_ab[0])))
+        prev_co = co_true.detach().clone()
+
+    # ---- 固定轮数跑完：最终模型 = 末轮末态（事先约定，不做任何选优） ----
+    torch.save(model.state_dict(), os.path.join(outdir, 'model.pth'))
+    np.save(os.path.join(outdir, 'co_true_final.npy'), co_true.detach().cpu().numpy())
+    if args.no_co_update:
+        final_note = ' (Stage-1 only, no CO update)'
+        log('final model = Stage-1 末态（--no-co-update：CO 全程未参与更新）')
+    else:
+        final_note = ' (fixed schedule: end of round %d/%d)' % (args.alt_rounds, args.alt_rounds)
+        log('alternate done: %d rounds (固定轮数，无 val 早停/选优) | final model = 末轮末态'
+            % args.alt_rounds)
 
     # ============ CO_true 诊断（供 forward model 分析） ============
     with torch.no_grad():
@@ -454,14 +531,8 @@ def main():
     log('CO negativity removed: %d px 未修正的负值（应为 0）' % n_neg_after)
 
     # ============ 测试（测量 CO） ============
-    # 注意：Stage-2b 结束时内存里的模型是最后一轮（往往已过拟合），
-    # 必须重新加载 val 最优的 model.pth 再做最终评估，否则指标严重失真。
-    best_path = os.path.join(outdir, 'model.pth')
-    final_note = ' (current model)'
-    if best_ep > 0 and os.path.exists(best_path):
-        model.load_state_dict(torch.load(best_path, map_location=device,
-                                         weights_only=True))
-        final_note = ' (reloaded best model @ep%d)' % best_ep
+    # 注意：交替训练结束时内存里的模型是最后一轮（往往已过拟合），所以要跑最终评估
+    # 前必须先回滚 —— 上面已重新加载 val 最优的【模型 + CO_true 配对】，否则指标失真。
     log('final eval uses%s' % final_note)
     log('MLP ||W|| (final) = %.3f | per-layer: %s'
         % (model_norm(model),
@@ -511,7 +582,13 @@ def main():
              co_pull=co_pull_all, qpah=ytr.detach().cpu().numpy(),
              qpah_err=sig_eval[train_idx], co_det=det[train_idx],
              g_co=g_co, sigma_post=sigma_post, sigma_ratio=sig_ratio,
-             sigma_eff=se_np)
+             sigma_eff=se_np,
+             alt_rounds=n_rounds_eff,
+             no_co_update=args.no_co_update, clip_co_neg=args.clip_co_neg,
+             co_true_s2a=(np.asarray(s2a_hist, dtype=np.float32) if s2a_hist
+                          else np.zeros((0, len(train_idx)), dtype=np.float32)),
+             co_true_s2b=(np.asarray(s2b_hist, dtype=np.float32) if s2b_hist
+                          else np.zeros((0, len(train_idx)), dtype=np.float32)))
     model.eval()
     with torch.no_grad():
         pt = model(build_X(co_m, test_idx)).cpu().numpy()
@@ -526,22 +603,29 @@ def main():
     pull_p16 = float(np.percentile(pull, 16))
     pull_p84 = float(np.percentile(pull, 84))
     frac_neg = float(np.mean(pt < 0))
-    log('Stage-2 spatial test (meas CO): chi2_red=%.3f (ideal 1) | '
+    log('spatial test (meas CO%s): chi2_red=%.3f (ideal 1) | '
         'pull med=%.3f std=%.3f [p16=%.3f p84=%.3f]'
-        % (chi2_red, pull_med, pull_std, pull_p16, pull_p84))
+        % (', clipped>=0' if args.clip_co_neg else '', chi2_red, pull_med, pull_std,
+           pull_p16, pull_p84))
     json.dump(dict(selection=args.selection, tag=tag, h5=h5path, n=ds['n_total'],
                    config_file=cfg_path,
                    config=cfg,
                    model_hidden=list(hidden), model_dropout=dropout,
                    split=dict(n_sectors=n_sectors, train_sector_frac=train_frac,
-                              val_frac_of_train=val_frac, random_state=seed),
-                   n_det=int(det.sum()), n_train=len(train_idx), n_val=len(val_idx),
+                              random_state=seed, val=None,
+                              note='训练扇区全部像素进迭代；空间测试扇区不参与训练'),
+                   n_det=int(det.sum()), n_det_train=int(det[train_idx].sum()),
+                   n_det_test=int(det[test_idx].sum()),
+                   n_train=len(train_idx),
                    n_test=len(test_idx), snr_thresh=args.snr_thresh,
+                   no_co_update=bool(args.no_co_update),
+                   clip_co_neg=bool(args.clip_co_neg),
+                   co_frac_raw_neg=float(100.0 * (co_meas_raw < 0).mean()),
                    err_weight=not args.no_err_weight, err_floor=args.err_floor,
                    huber_delta=args.huber_delta,
-                   stage1_val=float(v1), stage1_best_epoch=best_s1_ep,
-                   stage1_best_val=float(best_s1) if best_s1 < float('inf') else None,
-                   stage2_best_val=float(best), best_epoch=best_ep,
+                   stage1_epochs=args.stage1_epochs,
+                   alt_rounds=args.alt_rounds,
+                   alt_rounds_hist=round_hist,
                    co_only_steps=args.co_only_steps, joint_epochs=args.joint_epochs,
                    prior_lambda=args.prior_lambda,
                    chi2_red=chi2_red, pull_med=pull_med, pull_std=pull_std,

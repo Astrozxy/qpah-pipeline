@@ -4,14 +4,20 @@
 plot_galaxy_map.py — 全样本 RA-Dec 三面板图（观测 / 预测 / 残差）。
 复刻 M31_power_law.ipynb 的 tmp/M31_model.pdf 图：
   - 用训练好的模型对全部有效样本逐像素预测；
-  - 3 面板：Observation / Prediction / chi = (pred-obs)/sigma_eff（相对误差，
-    因为 qPAH 观测误差是异方差的，绝对残差不可比）；
+  - 3 面板：Observation / Prediction / 第 3 面板（由 --resid-mode 决定）：
+      chi (默认) = (pred-obs)/σ_eff —— 归一化相对误差。qPAH 观测误差逐像素异方差，
+                   所以"拟合好不好"必须用它判断（χ²_red、pull 分布）；
+      abs        = pred-obs（qPAH 百分点）—— 绝对误差。物理尺度直观、能暴露
+                   "哪里错得最多 / 错多少"，但高 σ_eff 像素天然主导色标幅度，
+                   不能拿它当拟合优度判据（低误差像素的 1σ 会被视觉压平）。
   - 叠加测试扇区（test sectors）的径向虚线 + 边框高亮。
 
 用法:
+  python plot_galaxy_map.py --tag coalt_full [--resid-mode chi|abs] [--resid-vmax 5]
   python plot_galaxy_map.py --tag coalt_full [--dataset data/M31_1d_array_full.h5]
 
-输出: results/<tag>/fig_galaxy_map.png (+ .pdf)
+输出: results/<tag>/fig_galaxy_map.png (+ .pdf)                [chi 模式]
+      results/<tag>/fig_galaxy_map_absresid.png (+ .pdf)      [abs 模式]
 """
 import os, json, argparse
 import numpy as np
@@ -65,6 +71,13 @@ def main():
     ap.add_argument('--dataset', default=None)
     ap.add_argument('--err-floor', type=float, default=0.2,
                     help='σ_eff = sqrt(qpah_err² + err_floor²)，需与训练一致')
+    ap.add_argument('--resid-mode', choices=['chi', 'abs'], default='chi',
+                    help="第 3 面板口径：chi=(pred-obs)/σ_eff（默认，归一化相对误差）；"
+                         "abs=pred-obs（绝对误差，qPAH 百分点）")
+    ap.add_argument('--resid-vmax', type=float, default=None,
+                    help='abs 模式的对称色标上限；默认自动取 |resid| 的 p99')
+    ap.add_argument('--clip-co-neg', action='store_true',
+                    help='输入时把 CO 裁剪到 ≥0（需与训练一致；--no-co-update 基线用）')
     args = ap.parse_args()
     resdir = os.path.join(RESULTS, args.tag)
 
@@ -84,6 +97,10 @@ def main():
            & np.isfinite(X[:, 3]) & np.isfinite(co_sigma) & (co_sigma > 0))
     ra = ra[idx]; dec = dec[idx]; qpah = qpah[idx]
     qpah_err = qpah_err[idx]; X = X[idx]
+    if args.clip_co_neg:                      # 与训练一致：CO 输入 max(CO,0)
+        n_raw_neg = int((X[:, 3] < 0).sum())
+        X[:, 3] = np.maximum(X[:, 3], 0.0)
+        print('--clip-co-neg: CO>=0 (negative %d px -> 0)' % n_raw_neg, flush=True)
     print('valid n =', len(qpah), flush=True)
 
     # 扇区划分（与 train_co_alternate.py sector_split 一致）
@@ -117,6 +134,15 @@ def main():
     with torch.no_grad():
         pred = model(torch.tensor(Xn, dtype=torch.float32).to(device)
                      ).cpu().numpy().flatten()
+
+    # 两种残差口径（第 3 面板二选一）
+    resid = pred - qpah                                   # 绝对残差 (qPAH %)
+    sig_eff = np.sqrt(qpah_err ** 2 + args.err_floor ** 2)
+    chi = resid / sig_eff                                 # 归一化相对误差
+    print('abs resid: med=%+.3f p16=%+.3f p84=%+.3f rms=%.3f | '
+          'chi: med=%+.3f std=%.3f' %
+          (np.median(resid), np.percentile(resid, 16), np.percentile(resid, 84),
+           np.sqrt(np.mean(resid ** 2)), np.median(chi), np.std(chi)), flush=True)
 
     # ==================== 绘图（复刻 notebook cell） ====================
     plt.style.use('default')
@@ -235,7 +261,18 @@ def main():
     cmap = cm.inferno
     cmap_diff = cm.coolwarm
     norm_qpah = Normalize(vmin=0, vmax=8)
-    norm_diff = Normalize(vmin=-3, vmax=3)
+    if args.resid_mode == 'chi':
+        norm_diff = Normalize(vmin=-3, vmax=3)
+        panel3_vals = chi
+        panel3_title = r"$\chi=(\mathrm{pred}-\mathrm{obs})/\sigma_{\rm eff}$"
+        panel3_label = r"$\chi$  $(\sigma_{\rm eff})$"
+    else:
+        vmax3 = args.resid_vmax if args.resid_vmax else float(np.percentile(np.abs(resid), 99))
+        norm_diff = Normalize(vmin=-vmax3, vmax=vmax3)
+        panel3_vals = resid
+        panel3_title = r"$\mathrm{pred}-\mathrm{obs}$  ($q_{\rm PAH}$ %)"
+        panel3_label = r"$\mathrm{pred}-\mathrm{obs}$  (%)"
+        print('abs-resid panel: symmetric vmax=%.2f (|resid| p99)' % vmax3, flush=True)
 
     ax0 = fig.add_subplot(131)
     ax0.scatter(ra, dec, s=0.1, c=cmap(norm_qpah(qpah)), rasterized=True)
@@ -253,14 +290,12 @@ def main():
     ax1.set_title("Prediction")
 
     ax2 = fig.add_subplot(133)
-    # 第 3 面板：相对误差 χ = (pred − obs)/σ_eff（观测误差是异方差的，绝对残差不可比）
-    sig_eff = np.sqrt(qpah_err ** 2 + args.err_floor ** 2)
-    chi = (pred - qpah) / sig_eff
-    ax2.scatter(ra, dec, s=0.1, c=cmap_diff(norm_diff(chi)), rasterized=True)
+    # 第 3 面板：--resid-mode 决定画 归一化相对误差 χ 还是 绝对残差 (pred−obs)
+    ax2.scatter(ra, dec, s=0.1, c=cmap_diff(norm_diff(panel3_vals)), rasterized=True)
     draw_radial_lines(ax2, 'magenta')
     highlight_border_sectors(ax2, 'magenta')
     ax2.set_xlabel("RA (J2000)")
-    ax2.set_title(r"$\chi=(\mathrm{pred}-\mathrm{obs})/\sigma_{\rm eff}$")
+    ax2.set_title(panel3_title)
 
     for ax in [ax0, ax1, ax2]:
         ax.tick_params(direction='in')
@@ -283,14 +318,17 @@ def main():
     sm_res = ScalarMappable(norm=norm_diff, cmap=cmap_diff)
     sm_res.set_array([])
     cbar_res = fig.colorbar(sm_res, cax=cax_res, orientation='vertical')
-    cbar_res.set_label(r"$\chi$  $(\sigma_{\rm eff})$")
+    cbar_res.set_label(panel3_label)
 
     for cb in [cbar_left, cbar_res]:
         cb.ax.tick_params(direction='in')
 
     plt.subplots_adjust(wspace=0.0, bottom=0.17)
-    png = os.path.join(resdir, 'fig_galaxy_map.png')
-    pdf = os.path.join(resdir, 'fig_galaxy_map.pdf')
+    # chi 模式写 fig_galaxy_map.*（保持原文件名）；abs 模式另存 fig_galaxy_map_absresid.*，
+    # 避免覆盖 χ 版
+    suffix = '' if args.resid_mode == 'chi' else '_absresid'
+    png = os.path.join(resdir, 'fig_galaxy_map%s.png' % suffix)
+    pdf = os.path.join(resdir, 'fig_galaxy_map%s.pdf' % suffix)
     plt.savefig(png, dpi=200)
     plt.savefig(pdf, dpi=200)
     print('saved', png, flush=True)

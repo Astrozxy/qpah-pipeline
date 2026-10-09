@@ -9,19 +9,23 @@
     "  - 每次运行会把【实际生效】的配置存进 results/<tag>/train.json 的 config 字段，便于复现",
     "  - JSON 不支持注释，因此说明都写在每个分组的 _comment / _knobs 里",
     "",
-    "三步流程（严格按用户方案）：",
-    "  Stage-1 : 只用 CO/sigma > snr_thresh 的像素训练，【假设观测值就是真值】（不加 CO 先验项）",
-    "  Stage-2a: 冻结模型，以 CO 观测为先验，反推【全部训练扇区像素】的 CO_true（不论 S/N）",
-    "  Stage-2b: 用更新后的 CO_true 训练，同时放开模型参数，联合微调",
-    "  约定：测试扇区不做反推（否则等于用 qPAH 标签反推输入 = 泄漏），预测一律用观测值输入。",
+    "口径（现行）：【没有 val】。10 个方位扇区 -> 6 训练 / 4 空间测试；训练扇区全部像素进迭代，",
+    "  不切 val、不早停、不选模型；空间测试扇区不参与训练与任何训练期判断，只在最后评估+画图。",
+    "",
+    "固定轮数流程（全部预先约定，训练中不看任何留出数据）：",
+    "  Stage-1 : 只用 CO/sigma > snr_thresh 的像素训练，跑满 stage1.epochs，末态保存",
+    "  Stage-2 : 交替 stage2.alt_rounds 轮，每轮 =",
+    "      2a: 冻结模型，以 CO 观测为先验，反推训练扇区全部像素的 CO_true（不论 S/N）",
+    "      2b: 用更新后的 CO_true 训练，同时放开模型参数，联合微调，跑满 stage2.joint_epochs",
+    "  最终模型 = 末轮末态（不做选优）；每轮另存 model_round<r>.pth + co_true_round<r>.npy 供事后诊断。",
     "",
     "【高 CO 端失真】优先看这几个旋钮（注意：实测把模型加宽反而过拟合，见 model._comment）：",
     "  1) optim.weight_decay  —— 压制模型对输入响应的直接元凶之一（g 会变小）",
     "  2) loss.huber_delta    —— 太小会压制大残差（高值端欠拟合）",
     "  3) loss.err_floor      —— 决定低误差像素在 loss 里的权重",
-    "  4) stage1.rebalance_by_qpah / weight_cap_factor —— 高低 qPAH 的采样平衡",
-    "  5) stage1.epochs       —— 现在 300 轮时 Stage-1 训练 loss 仍在下降",
-    "  6) stage2.joint_epochs —— best_epoch 常出现在 20-40 轮，200 轮明显过拟合",
+    "  4) stage1.rebalance_by / weight_cap_factor —— 高低 qPAH 的采样平衡",
+    "  5) stage1.epochs       —— 无 val 早停，纯固定轮数，跑短跑长全凭这里定",
+    "  6) stage2.joint_epochs / alt_rounds —— 同上，固定轮数",
     "  （model.hidden 已实测加宽 -> 过拟合，建议保持 [32,32]）"
   ],
 
@@ -38,16 +42,14 @@
   },
 
   "split": {
-    "_comment": "空间扇区划分：按方位角分 n_sectors 个扇区，取 train_sector_frac 作训练、其余作测试（防空间泄漏）",
+    "_comment": "空间扇区划分：按方位角分 n_sectors 个扇区，取 train_sector_frac 作训练、其余作【空间测试扇区】。无 val。",
     "_knobs": {
       "n_sectors": "扇区数量",
-      "train_sector_frac": "训练扇区比例（0.6 = 6/10）",
-      "val_frac_of_train": "从训练扇区里再切出的验证集比例（用于选最优模型、早停）",
-      "random_state": "随机种子：决定扇区选择、训练/验证划分、以及网络初始化"
+      "train_sector_frac": "训练扇区比例（0.6 = 6/10）；训练扇区全部像素进迭代",
+      "random_state": "随机种子：决定扇区选择与网络初始化"
     },
     "n_sectors": 10,
     "train_sector_frac": 0.6,
-    "val_frac_of_train": 0.2,
     "random_state": 0
   },
 
@@ -62,11 +64,9 @@
   },
 
   "stage1": {
-    "_comment": "阶段1：只在 CO 探测像素上训练，CO 固定为观测值（无 CO 先验项）。已加入验证集选优+早停：实测训练 loss 一路降（0.43->0.32@1000轮）但 val 先降后升（300轮 1.071 -> 1000轮 1.958），所以必须靠早停，而不是设固定轮数",
+    "_comment": "阶段1：只在 CO 探测像素上训练，CO 固定为观测值（无 CO 先验项），跑满 epochs。【无 val】：不早停、不选模型，末态即结果。历史实测：训练 loss 一路降（0.43->0.32@1000轮）而（当时的）val 先降后升（300轮 1.071 -> 1000轮 1.958），那是在旧 val 口径下的现象；现行口径不再据此停。",
     "_knobs": {
-      "epochs": "轮数上限（有早停保护，设大一点安全，默认 1000）",
-      "eval_every": "每多少轮评估一次验证集并考虑保存最优",
-      "patience": "连续多少次评估无改善就早停（0 = 关闭早停）",
+      "epochs": "固定轮数（无 val 早停，跑满；默认 500）",
       "lr": "Adam 初始学习率",
       "sched_step": "StepLR 衰减周期（轮）",
       "sched_gamma": "StepLR 衰减因子",
@@ -74,9 +74,7 @@
       "n_bins": "分箱数（joint 模式下取 sqrt 作为每维箱数）",
       "weight_cap_factor": "采样权重上限 = 该因子 x 权重 p95（调小 -> 更平权；调大 -> 更强调稀有档）"
     },
-    "epochs": 1000,
-    "eval_every": 20,
-    "patience": 10,
+    "epochs": 500,
     "lr": 0.01,
     "sched_step": 100,
     "sched_gamma": 0.8,
@@ -86,21 +84,23 @@
   },
 
   "stage2": {
-    "_comment": "阶段2a/2b。prior_lambda 是 CO 高斯先验强度：loss += 0.5*lambda*((c-CO_meas)/sigma_CO)^2",
+    "_comment": "阶段2a/2b 交替。【无 val】：固定 alt_rounds 轮、每轮 2b 跑满 joint_epochs，末轮末态即最终模型。prior_lambda 是 CO 高斯先验强度：loss += 0.5*lambda*((c-CO_meas)/sigma_CO)^2",
     "_knobs": {
-      "co_only_steps": "2a 步数。50 步远未收敛（loss 仍在降），默认已改 1000；可继续加大",
+      "alt_rounds": "交替优化轮数（每轮 = 2a 更新 CO_true + 2b 联合微调模型+CO_true）。2b 改完模型后 2a 的最优性失效，多交替几次让它收敛；默认 5",
+      "co_only_steps": "每轮 2a 的步数。50 步远未收敛，默认 1000",
       "co_lr": "2a 中 CO_true 的学习率",
       "prior_lambda": "CO 先验强度。调小 -> CO_true 更敢偏离观测（观测差的地方靠 qPAH 反推）",
       "clamp_min": "CO_true 下限（0 = 正性约束，负 CO 不物理）",
-      "joint_epochs": "2b 轮数。已由 200 降到 50：实测 best_epoch 只在 20-40 轮，后 160 轮纯过拟合（val 从 0.75 涨到 0.99）",
+      "joint_epochs": "每轮 2b 的固定轮数（无 val 早停，跑满；默认 100）",
       "joint_model_lr": "2b 中模型参数学习率（小步微调）",
       "joint_co_lr": "2b 中 CO_true 学习率"
     },
+    "alt_rounds": 5,
     "co_only_steps": 1000,
     "co_lr": 0.001,
     "prior_lambda": 1.0,
     "clamp_min": 0.0,
-    "joint_epochs": 50,
+    "joint_epochs": 100,
     "joint_model_lr": 0.0001,
     "joint_co_lr": 0.001
   },

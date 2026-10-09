@@ -60,9 +60,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--selection', choices=['full', 'agb'], default='full')
     ap.add_argument('--rebuild', action='store_true')
+    ap.add_argument('--require', nargs='+', default=None,
+                    help='【必需】特征列名（如: H1 CO sfr H1_ew）。默认全部 5 个。'
+                         '未列入的特征仍写进文件（缺失处 NaN）。用途：dust(SCUBA-2 850μm)'
+                         ' 只覆盖网格 11.2%、是覆盖率唯一瓶颈，而它对模型贡献≈0，'
+                         '去掉它可让可用面积翻倍以上。')
+    ap.add_argument('--out', default=None, help='输出文件名（默认按 selection 命名）')
     args = ap.parse_args()
 
-    out_name = 'M31_1d_array_full.h5' if args.selection == 'full' else 'M31_1d_array_agb.h5'
+    out_name = args.out or ('M31_1d_array_full.h5' if args.selection == 'full'
+                            else 'M31_1d_array_agb.h5')
     out_path = os.path.join(DATA, out_name)
     if os.path.exists(out_path) and not args.rebuild:
         log('已存在，跳过（--rebuild 可重建）:', out_path)
@@ -93,8 +100,15 @@ def main():
     idx_M32 = ((ra_g - 10.67) ** 2 + (dec_g - 40.86) ** 2) < (2.5 / 60.) ** 2
 
     ok = (~idx_M32) & np.isfinite(qpah) & np.isfinite(qpah_err)
-    for key in feats:
-        ok &= np.isfinite(vals[key])
+    req_cols = set(args.require) if args.require else set(feats.values())
+    unknown = req_cols - set(feats.values())
+    if unknown:
+        raise SystemExit('--require 里有未知列: %s（可选: %s）'
+                         % (sorted(unknown), sorted(feats.values())))
+    log('required features: %s' % sorted(req_cols))
+    for key, col in feats.items():
+        if col in req_cols:                      # 只对必需特征做有限性筛选
+            ok &= np.isfinite(vals[key])
     if args.selection == 'agb':
         ok &= agb_mask(shape, wcel)
     ry, rx = np.where(ok)
@@ -110,9 +124,10 @@ def main():
         for k, v in out.items():
             f[k] = v
         f.attrs['selection'] = args.selection
+        f.attrs['required_features'] = sorted(req_cols)
         f.attrs['note'] = ('pixel-center; features = reproject_exact block avg (cov>0.5); '
                            'qpah/qpah_err in percent; CO_sigma/CO_det from make_co_maps+align '
-                           '(native S/N>3 探测占比)')
+                           '(native S/N>3 探测占比); 未列入 required_features 的列可能含 NaN')
     log('saved', out_path, 'rows:', len(out['ra']))
     log('ALL DONE')
 
