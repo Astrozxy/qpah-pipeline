@@ -58,6 +58,10 @@ def main():
     ap.add_argument('--abs-vmax', type=float, default=2.0, help='绝对误差色标范围 ±(%)')
     ap.add_argument('--qpah-err-max', type=float, default=None,
                     help='只保留 qpah_err <= 该值的目标像素（默认不切）')
+    ap.add_argument('--train-co-snr', type=float, default=None,
+                    help='只用 CO/CO_sigma > 该值的像素【拟合】（CO 是当前最差的图）')
+    ap.add_argument('--zero-co-snr', type=float, default=None,
+                    help='【预测】时把 CO/CO_sigma <= 该值的像素的 CO 置 0（未探测=无 CO）')
     args = ap.parse_args()
     feats, spa = args.features, list(args.spatial)
 
@@ -89,20 +93,41 @@ def main():
     tr_s = np.random.choice(np.arange(10), size=6, replace=False)
     in_tr = np.isin(sec, tr_s)
 
-    floors = np.array([max(1e-9, 0.01 * np.median(X[in_tr, j][X[in_tr, j] > 0]))
+    # ---- CO 的探测/未探测处理（CO 是当前最差的图）----
+    jco = feats.index('CO') if 'CO' in feats else None
+    snr = None
+    if jco is not None:
+        snr = X[:, jco] / np.maximum(d['CO_sigma'][sel].astype(float), 1e-30)
+    fit_mask = in_tr.copy()
+    if jco is not None and args.train_co_snr is not None:
+        fit_mask = in_tr & (snr > args.train_co_snr)
+    # 未探测（CO/σ <= 阈值）一律取 0：拟合与预测【都】用这个"探测即值、未探测即零"的 CO
+    Xp = X.copy()
+    nzero = 0
+    if jco is not None and args.zero_co_snr is not None:
+        zc = snr <= args.zero_co_snr
+        nzero = int(zc.sum())
+        Xp[zc, jco] = 0.0
+        X = Xp.copy()
+
+    floors = np.array([max(1e-9, 0.01 * np.median(X[fit_mask, j][X[fit_mask, j] > 0]))
                        for j in range(X.shape[1])])
-    parts = [np.log10(X + floors[None, :])]
-    if spa:
-        parts += [np.asarray(s)[:, None] for s in spatial_terms(ra, dec, spa)]
-    Z = np.column_stack(parts)
     names = list(feats) + spa
 
-    mu, sd = Z[in_tr].mean(0), Z[in_tr].std(0) + 1e-12
-    Dall = np.column_stack([np.ones(len(Z)), (Z - mu) / sd])
-    w = 1.0 / sig[in_tr] ** 2
-    coef = np.linalg.solve(Dall[in_tr].T @ (w[:, None] * Dall[in_tr]),
-                           Dall[in_tr].T @ (w * y[in_tr]))
-    pred = Dall @ coef
+    def _design(Xmat):
+        pr = [np.log10(Xmat + floors[None, :])]
+        if spa:
+            pr += [np.asarray(s)[:, None] for s in spatial_terms(ra, dec, spa)]
+        return np.column_stack(pr)
+
+    Zf, Zp = _design(X), _design(Xp)
+    mu, sd = Zf[fit_mask].mean(0), Zf[fit_mask].std(0) + 1e-12
+    Df = np.column_stack([np.ones(len(Zf)), (Zf - mu) / sd])
+    w = 1.0 / sig[fit_mask] ** 2
+    coef = np.linalg.solve(Df[fit_mask].T @ (w[:, None] * Df[fit_mask]),
+                           Df[fit_mask].T @ (w * y[fit_mask]))
+    pred = np.column_stack([np.ones(len(Zp)), (Zp - mu) / sd]) @ coef
+    Z = Zf
     resid = pred - y
     chi = resid / sig
 
@@ -117,7 +142,14 @@ def main():
           % (len(y), in_tr.sum(), (~in_tr).sum(), ' '.join(feats),
              ' '.join(spa) if spa else '(无)',
              ('  | cut: qpah_err<=%.2f' % args.qpah_err_max) if args.qpah_err_max is not None else ''))
-    print('chi2  train=%.4f  test=%.4f  all=%.4f' % (c2_tr, c2_te, c2_all))
+    if jco is not None and args.train_co_snr is not None:
+        print('CO: 拟合只用 %d 个 CO>%.1fsigma 的像素（占训练集 %.1f%%）'
+              % (fit_mask.sum(), args.train_co_snr, 100 * fit_mask.sum() / max(1, in_tr.sum())))
+    if nzero:
+        print('CO: 预测时 %d 个 CO<=%.1fsigma 的像素被置 0（占全部 %.1f%%）'
+              % (nzero, args.zero_co_snr, 100 * nzero / len(y)))
+    print('chi2  fit集=%.4f  train扇区=%.4f  test=%.4f  all=%.4f'
+          % (np.mean(chi[fit_mask] ** 2), c2_tr, c2_te, c2_all))
     print('pull(all) 中位=%+.4f  std=%.4f  [p16=%+.3f p84=%+.3f]'
           % (pm_all, ps_all, np.percentile(chi, 16), np.percentile(chi, 84)))
     print('绝对残差 med=%+.3f p16=%+.3f p84=%+.3f rms=%.3f'
