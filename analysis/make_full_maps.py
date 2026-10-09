@@ -54,7 +54,8 @@ def main():
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--out', default='results/fullmaps/fig_full_4panel.png')
     ap.add_argument('--qmax', type=float, default=6.0, help='qPAH 色标上限 (%)')
-    ap.add_argument('--chi-vmax', type=float, default=3.0)
+    ap.add_argument('--chi-vmax', type=float, default=3.0, help='相对误差色标范围 ±(sigma)')
+    ap.add_argument('--abs-vmax', type=float, default=2.0, help='绝对误差色标范围 ±(%)')
     args = ap.parse_args()
     feats, spa = args.features, list(args.spatial)
 
@@ -123,9 +124,13 @@ def main():
     # ---------------- 4 面板 ----------------
     order = np.argsort(np.abs(chi))[::-1]        # 大残差画在上面
     nrm_q = Normalize(0, args.qmax)
-    nrm_c = Normalize(-args.chi_vmax, args.chi_vmax)
-    vmax_a = float(np.percentile(np.abs(resid), 99))
-    nrm_a = Normalize(-vmax_a, vmax_a)
+    nrm_c = Normalize(-args.chi_vmax, args.chi_vmax)     # 固定 ±3 sigma
+    nrm_a = Normalize(-args.abs_vmax, args.abs_vmax)     # 固定 ±2 %
+    print('色标: qPAH 0–%.1f%% | 相对误差 ±%.1fσ | 绝对误差 ±%.1f%%（固定范围）'
+          % (args.qmax, args.chi_vmax, args.abs_vmax))
+    print('超出色标范围（会被裁到端点色）: |χ|>%.1fσ 占 %.2f%% ； |resid|>%.1f%% 占 %.2f%%'
+          % (args.chi_vmax, 100 * np.mean(np.abs(chi) > args.chi_vmax),
+             args.abs_vmax, 100 * np.mean(np.abs(resid) > args.abs_vmax)))
 
     fig, ax = plt.subplots(1, 4, figsize=(26, 6.6))
     panels = [
