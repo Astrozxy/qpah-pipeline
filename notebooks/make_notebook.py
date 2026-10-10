@@ -407,20 +407,27 @@ print('1-sigma uncertainty on chi2_red (beam-averaged, N_eff = %.0f) = %.4f'
       % (n_eff, np.sqrt(2 / n_eff)))
 print('=> the difference is a small fraction of the statistical uncertainty: AGB adds nothing.')"""))
 
-    c.append(MD("## 7. The published model — maps of observation, prediction and error"))
-    c.append(CODE(r"""def four_panel(r, sel, fname):
+    c.append(MD(r"""## 7. The published model — maps of observation, prediction and error
+
+> **Three panels only.** The fit and every reported statistic are weighted by
+> $1/\sigma_{\rm eff}^2$. An *unweighted* absolute-residual map would be dominated by the
+> pixels with the largest $q_{\rm PAH}$ uncertainty and carries no diagnostic information,
+> so we show the normalised error $\chi$ instead.
+> (`analysis/make_full_maps.py --with-abs` brings the fourth panel back if wanted.)"""))
+
+    c.append(CODE(r"""def three_panel(r, sel, fname):
     ra, dec = d['ra'][sel], d['dec'][sel]
     y, pred, sig = r['y'], r['pred'], r['sig']
-    chi, resid = (pred - y) / sig, pred - y
-    qmax = 6.0; cvm = 3.0; avm = 2.0
+    chi = (pred - y) / sig
+    qmax, cvm = 6.0, 3.0
     order = np.argsort(np.abs(chi))[::-1]
     panels = [
         (r'Observation  $q_{\rm PAH}$', y, 'inferno', (0, qmax), r'$q_{\rm PAH}$ (%)'),
         (r'Prediction  $q_{\rm PAH}$',  pred, 'inferno', (0, qmax), r'$q_{\rm PAH}$ (%)'),
-        (r'Relative error  $\chi$', chi, 'coolwarm', (-cvm, cvm), r'$\chi$ ($\sigma_{\rm eff}$)'),
-        (r'Absolute error', resid, 'coolwarm', (-avm, avm), r'pred $-$ obs (%)'),
+        (r'Relative error  $\chi=(\mathrm{pred}-\mathrm{obs})/\sigma_{\rm eff}$',
+         chi, 'coolwarm', (-cvm, cvm), r'$\chi$ ($\sigma_{\rm eff}$)'),
     ]
-    fig, ax = plt.subplots(1, 4, figsize=(24, 6))
+    fig, ax = plt.subplots(1, 3, figsize=(20, 6.4))
     for a, (t, v, cm, rng, cl) in zip(ax, panels):
         sc = a.scatter(ra[order], dec[order], s=1.0, c=v[order], cmap=cm,
                        vmin=rng[0], vmax=rng[1], rasterized=True, linewidths=0)
@@ -428,13 +435,23 @@ print('=> the difference is a small fraction of the statistical uncertainty: AGB
         a.invert_xaxis()
         fig.colorbar(sc, ax=a, fraction=0.046, pad=0.02, label=cl)
     ax[0].set_ylabel('Dec (deg)')
-    fig.suptitle('log-linear model, %d observables + %d spatial terms   (n = %d, all pixels)'
+    p = r['pull']
+    fig.text(0.012, -0.015,
+             'n = %d  (train %d / held-out %d)\n'
+             'held-out: $\\chi^2_{\\rm red}$=%.3f, pull %+.3f$\\pm$%.3f\n'
+             'all     : $\\chi^2_{\\rm red}$=%.3f, pull %+.3f$\\pm$%.3f'
+             % (sel.sum(), r['in_train'].sum(), (~r['in_train']).sum(),
+                np.mean(p[~r['in_train']] ** 2), np.median(p[~r['in_train']]), np.std(p[~r['in_train']]),
+                np.mean(p ** 2), np.median(p), np.std(p)),
+             ha='left', va='top', fontsize=11)
+    fig.suptitle('log10-linear model: %d observables + %d spatial terms   '
+                 '(n = %d, all pixels, no sector selection)'
                  % (r['n_log'], len(SPA), sel.sum()), fontsize=14)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.0, 1, 0.94])
     fig.savefig(os.path.join(OUT, fname), dpi=170, bbox_inches='tight')
     plt.show()
 
-four_panel(res_no, sel, 'fig_4panel.png')"""))
+three_panel(res_no, sel, 'fig_3panel.png')"""))
 
     c.append(MD("## 8. Radial dependence"))
     c.append(CODE(r"""fig, ax = plt.subplots(1, 2, figsize=(13, 4.8))

@@ -41,7 +41,8 @@ def spatial_terms(ra, dec, which):
     x = (dx * np.sin(PA) + dy * np.cos(PA)) * 3600.0 / ARCSEC_PER_KPC
     y = ((-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)) * 3600.0 / ARCSEC_PER_KPC
     R = np.sqrt(x ** 2 + y ** 2)
-    pool = {'x': x, 'y': y, 'R': R, 'logR': np.log10(R + 0.1)}
+    pool = {'x': x, 'y': y, 'x_major': x, 'y_minor': y,
+            'R': R, 'logR': np.log10(R + 0.1)}
     return [pool[w] for w in which]
 
 
@@ -49,13 +50,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--h5', default='data/M31_1d_array_nodust.h5')
     ap.add_argument('--features', nargs='+', default=DEFAULT_FEATS)
-    ap.add_argument('--spatial', nargs='*', default=[], choices=['x', 'y', 'R', 'logR'],
+    ap.add_argument('--spatial', nargs='*', default=[],
+                    choices=['x', 'y', 'x_major', 'y_minor', 'R', 'logR'],
                     help='要加入的空间项（可多个，例如 --spatial x 或 --spatial R y x）')
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--out', default='results/fullmaps/fig_full_4panel.png')
     ap.add_argument('--qmax', type=float, default=6.0, help='qPAH 色标上限 (%)')
     ap.add_argument('--chi-vmax', type=float, default=3.0, help='相对误差色标范围 ±(sigma)')
     ap.add_argument('--abs-vmax', type=float, default=2.0, help='绝对误差色标范围 ±(%)')
+    ap.add_argument('--with-abs', action='store_true',
+                    help='额外加第 4 个绝对误差面板（默认不加：拟合与评估都用 1/sigma^2 加权，'
+                         '未加权的绝对误差图会被高 sigma 像素主导，不具诊断价值）')
     ap.add_argument('--qpah-err-max', type=float, default=None,
                     help='只保留 qpah_err <= 该值的目标像素（默认不切）')
     ap.add_argument('--train-co-snr', type=float, default=None,
@@ -163,21 +168,23 @@ def main():
     nrm_q = Normalize(0, args.qmax)
     nrm_c = Normalize(-args.chi_vmax, args.chi_vmax)     # 固定 ±3 sigma
     nrm_a = Normalize(-args.abs_vmax, args.abs_vmax)     # 固定 ±2 %
-    print('色标: qPAH 0–%.1f%% | 相对误差 ±%.1fσ | 绝对误差 ±%.1f%%（固定范围）'
-          % (args.qmax, args.chi_vmax, args.abs_vmax))
+    print('色标: qPAH 0–%.1f%% | 相对误差 ±%.1fσ%s'
+          % (args.qmax, args.chi_vmax,
+             (' | 绝对误差 ±%.1f%%' % args.abs_vmax) if args.with_abs else ''))
     print('超出色标范围（会被裁到端点色）: |χ|>%.1fσ 占 %.2f%% ； |resid|>%.1f%% 占 %.2f%%'
           % (args.chi_vmax, 100 * np.mean(np.abs(chi) > args.chi_vmax),
              args.abs_vmax, 100 * np.mean(np.abs(resid) > args.abs_vmax)))
 
-    fig, ax = plt.subplots(1, 4, figsize=(26, 6.6))
     panels = [
         (r'Observation  $q_{\rm PAH}$', y, 'inferno', nrm_q, r'$q_{\rm PAH}$ (%)'),
         (r'Prediction  $q_{\rm PAH}$', pred, 'inferno', nrm_q, r'$q_{\rm PAH}$ (%)'),
         (r'Relative error  $\chi=(\mathrm{pred}-\mathrm{obs})/\sigma_{\rm eff}$',
          chi, 'coolwarm', nrm_c, r'$\chi$   ($\sigma_{\rm eff}$)'),
-        (r'Absolute error  $\mathrm{pred}-\mathrm{obs}$',
-         resid, 'coolwarm', nrm_a, r'$\mathrm{pred}-\mathrm{obs}$   (%)'),
     ]
+    if args.with_abs:
+        panels.append((r'Absolute error  $\mathrm{pred}-\mathrm{obs}$',
+                       resid, 'coolwarm', nrm_a, r'$\mathrm{pred}-\mathrm{obs}$   (%)'))
+    fig, ax = plt.subplots(1, len(panels), figsize=(6.6 * len(panels), 6.6))
     for a, (title, val, cmap, nrm, clab) in zip(ax, panels):
         sc = a.scatter(ra[order], dec[order], s=1.0, c=val[order], cmap=cmap,
                        norm=nrm, rasterized=True, linewidths=0)
@@ -192,13 +199,14 @@ def main():
     txt = ('n = %d  (train %d / test %d)\n'
            'test: $\\chi^2_{\\rm red}$=%.3f, pull %+.3f$\\pm$%.3f\n'
            'all : $\\chi^2_{\\rm red}$=%.3f, pull %+.3f$\\pm$%.3f')
-    fig.text(0.5, -0.02, txt % (len(y), int(in_tr.sum()), int((~in_tr).sum()),
-                                c2_te, pm_te, ps_te, c2_all, pm_all, ps_all),
-             ha='center', fontsize=12)
+    # 放在左下角：3 面板时中间面板的 colorbar 正好在 x=0.5，居中的脚注会被压住
+    fig.text(0.012, -0.015, txt % (len(y), int(in_tr.sum()), int((~in_tr).sum()),
+                                   c2_te, pm_te, ps_te, c2_all, pm_all, ps_all),
+             ha='left', va='top', fontsize=11)
     fig.suptitle('log10-linear: %d observables (%s)%s  —  all pixels, no sector selection'
                  % (len(feats), ', '.join(feats),
                     ('  +  spatial: ' + ', '.join(spa)) if spa else ''), fontsize=14)
-    fig.tight_layout(rect=[0, 0.02, 1, 0.96])
+    fig.tight_layout(rect=[0, 0.0, 1, 0.945])
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
     fig.savefig(args.out, dpi=170, bbox_inches='tight'); plt.close(fig)
     print('saved', args.out)
