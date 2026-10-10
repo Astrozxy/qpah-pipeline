@@ -81,6 +81,8 @@ ERR_FLOOR   = 0.2      # added in quadrature to qpah_err (%)
 CO_SNR_ZERO = 3.0      # CO/CO_sigma <= this  ->  CO := 0   (non-detection)
 QPAH_ERR_MAX = 2.0     # target quality cut (%)
 RMAX        = 18.0     # kpc, Draine et al. caution: parameters unreliable at large radii
+HI_MIN      = 110.0    # K km/s; corresponds to N_HI = 2e20 cm^-2 (Sigma_HI = 1.6 Msun/pc^2)
+                       # below this the ISM is effectively absent and qPAH is unconstrained
 SEED        = 0"""))
 
     c.append(MD(r"""## 1. Dust luminosity map from Draine et al. (2014)
@@ -136,6 +138,7 @@ Starting from the pipeline dataset we apply, in order:
 | 5 | `CO_sigma > 0` | need a noise estimate for the CO S/N test |
 | 6 | `qpah_err <= 2` | an uncertainty of $\pm$2 % on a 0–10 % quantity carries no information |
 | 7 | `R <= 18 kpc` | Draine et al.: model parameters become unreliable at large radii |
+| 8 | `H1 >= 110` K km/s, i.e. $N_{H\,I} \ge 2\times10^{20}$ cm$^{-2}$ ($\Sigma_{H\,I}\ge1.6\ M_\odot$ pc$^{-2}$) | below this the ISM is effectively absent, so $q_{\rm PAH}$ is unconstrained and any agreement would be trivial |
 
 Cut 2 keeps the pile-up of real $q_{\rm PAH}=0$ measurements produced by the DL07
 bound $q_{\rm PAH}\ge 0$; we report those pixels separately throughout."""))
@@ -188,6 +191,7 @@ cut('H1 >= 0  &  H1_ew >= 0',              (d['H1'] >= 0) & (d['H1_ew'] >= 0))
 cut('CO_sigma > 0',                        np.isfinite(d['CO_sigma']) & (d['CO_sigma'] > 0))
 cut(f'qpah_err <= {QPAH_ERR_MAX}',         d['qpah_err'] <= QPAH_ERR_MAX)
 cut(f'R <= {RMAX} kpc',                    R <= RMAX)
+cut(f'H1 >= {HI_MIN:g} K km/s (N_HI>=2e20)', d['H1'] >= HI_MIN)
 
 n0 = len(d['qpah']); prev = n0
 print('\n%-34s %8s %9s %9s' % ('cut', 'N', 'kept', 'delta'))

@@ -45,6 +45,9 @@ def main():
     ap.add_argument('--draine', default=None, help='extract_draine_maps.py 的输出（与 h5 行对齐）')
     ap.add_argument('--qpah-err-max', type=float, default=2.0)
     ap.add_argument('--rmax', type=float, default=18.0)
+    ap.add_argument('--hi-min', type=float, default=110.0,
+                    help='HI mom0 下限 [K km/s]；默认 110 对应 N_HI >= 2e20 cm^-2'
+                         '（Sigma_HI >= 1.60 Msun/pc^2）—— 其下视为事实上没有 ISM')
     ap.add_argument('--outdir', default='results/final')
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
@@ -73,6 +76,8 @@ def main():
     steps.append(('qpah_err <= %.1f' % args.qpah_err_max, m.copy()))
     m &= (R <= args.rmax)
     steps.append(('R <= %.0f kpc' % args.rmax, m.copy()))
+    m &= (d['H1'] >= args.hi_min)
+    steps.append(('H1 >= %g K km/s (N_HI>=2e20)' % args.hi_min, m.copy()))
     sel = m
 
     print('=== 最终口径筛选漏斗 ===')
@@ -102,8 +107,9 @@ def main():
         for k, v in attrs.items():
             try: f.attrs[k] = v
             except Exception: pass
-        f.attrs['final_selection'] = ('qpah>=0 & 0<qpah_err<=%g & H1>=0 & H1_ew>=0 & CO_sigma>0 '
-                                      '& R<=%g kpc' % (args.qpah_err_max, args.rmax))
+        f.attrs['final_selection'] = ('qpah>=0 & 0<qpah_err<=%g & H1_ew>=0 & CO_sigma>0 '
+                                      '& R<=%g kpc & H1>=%g K km/s (N_HI>=2e20 cm^-2)'
+                                      % (args.qpah_err_max, args.rmax, args.hi_min))
     print('written %s (%.1f MB)' % (out, os.path.getsize(out) / 1e6))
 
     # ---- 诊断图 ----
