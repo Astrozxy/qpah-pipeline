@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 results/
+
+# notebook 的输入数据（35 MB，不入库）
+notebooks/data/
