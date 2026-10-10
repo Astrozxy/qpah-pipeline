@@ -211,10 +211,25 @@ print('   exact qPAH == 0 : %d  (%.2f%%)'
   applied **identically** when fitting and when predicting, so there is no leakage.
 * The two spatial terms enter **linearly** (they are signed).
 
-> **Note on redundancy.** An earlier version used $\{R, x, y\}$ with $R=\sqrt{x^2+y^2}$.
-> $R$ is a *non-linear* function of $x,y$, so the set is not linearly redundant (VIF $\approx 1$),
-> but it is unnecessary: dropping $R$ slightly **improves** the held-out $\chi^2$.
-> We therefore use the minimal set $\{x_{\rm maj}, y_{\rm min}\}$.
+> **Which spatial terms?** We tested a range of bases with **leave-one-sector-out**
+> cross-validation (every pixel is genuinely held out once):
+>
+> | basis | held-out $\chi^2$ | vs $\{x,y\}$ |
+> |---|---|---|
+> | none | 1.9419 | — |
+> | $\{x,y\}$ | 1.6935 | — |
+> | $\{x,y,x^2\}$ | 1.7870 | worse |
+> | $\{x,y,y^2\}$ | 1.7151 | worse |
+> | $\{x,y,x^2,y^2,xy\}$ | 2.2075 | much worse |
+> | **$\{x,y,y^3\}$** | **1.6121** | **$-0.081$ ($\sim7\sigma$)** |
+>
+> The **symmetric quadratic terms do not generalise**, but the **cubic in the minor axis
+> does** — and $y^3$ is precisely the asymmetric signature of a **warped disk**. With $y^3$
+> in the model the linear $y$ coefficient collapses from $-0.235$ to $-0.026$: the
+> minor-axis dependence is genuinely curved, not linear.
+>
+> An earlier version also used $R=\sqrt{x^2+y^2}$; dropping it slightly improves the held-out
+> $\chi^2$, so the minimal set is used.
 
 ### AGB stellar density
 
@@ -222,7 +237,7 @@ print('   exact qPAH == 0 : %d  (%.2f%%)'
 selected from the PHAT / PHAT-S colour–magnitude diagrams. It covers only the PHAT footprint,
 so we use `log10(count + 0.5)` and compare **on the AGB-covered subsample** to keep the sample fixed."""))
     c.append(CODE(r"""OBS = ['H1', 'sfr', 'CO', 'H1_ew', 'Ldust']
-SPA = ['x_major', 'y_minor']
+SPA = ['x_major', 'y_minor', 'y3']
 
 def build_design(d, sel, in_train, use_agb=False):
     raw_obs = np.maximum(np.column_stack([d[k][sel] for k in OBS]).astype(float), 0.0)
@@ -235,7 +250,9 @@ def build_design(d, sel, in_train, use_agb=False):
     names = list(OBS)
     if use_agb:
         cols.append(np.log10(d['AGB'][sel][:, None] + 0.5)); names.append('AGB')
-    sp = np.column_stack([d['x_major'][sel], d['y_minor'][sel]])
+    # y3 = (y_minor/2)^3 : asymmetric curvature along the minor axis, i.e. the WARP term
+    sp = np.column_stack([d['x_major'][sel], d['y_minor'][sel],
+                          (d['y_minor'][sel] / 2.0) ** 3])
     cols.append(sp); names += SPA
     X = np.column_stack(cols)
 

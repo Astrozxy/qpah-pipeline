@@ -41,7 +41,9 @@ def spatial_terms(ra, dec, which):
     x = (dx * np.sin(PA) + dy * np.cos(PA)) * 3600.0 / ARCSEC_PER_KPC
     y = ((-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)) * 3600.0 / ARCSEC_PER_KPC
     R = np.sqrt(x ** 2 + y ** 2)
+    y2 = y / 2.0
     pool = {'x': x, 'y': y, 'x_major': x, 'y_minor': y,
+            'y3': y2 ** 3, 'y2t': y2 ** 2,
             'R': R, 'logR': np.log10(R + 0.1)}
     return [pool[w] for w in which]
 
@@ -51,7 +53,7 @@ def main():
     ap.add_argument('--h5', default='data/M31_1d_array_nodust.h5')
     ap.add_argument('--features', nargs='+', default=DEFAULT_FEATS)
     ap.add_argument('--spatial', nargs='*', default=[],
-                    choices=['x', 'y', 'x_major', 'y_minor', 'R', 'logR'],
+                    choices=['x', 'y', 'x_major', 'y_minor', 'y3', 'y2t', 'R', 'logR'],
                     help='要加入的空间项（可多个，例如 --spatial x 或 --spatial R y x）')
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--out', default='results/fullmaps/fig_full_4panel.png')

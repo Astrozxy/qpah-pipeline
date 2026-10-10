@@ -31,14 +31,17 @@ def spatial(ra, dec):
     dx = (ra - RA0) * np.cos(np.radians(DEC0)); dy = dec - DEC0
     x = (dx * np.sin(PA) + dy * np.cos(PA)) * 3600.0 / ARCSEC_PER_KPC
     y = ((-dx * np.cos(PA) + dy * np.sin(PA)) / np.cos(INC)) * 3600.0 / ARCSEC_PER_KPC
-    return {'R': np.sqrt(x ** 2 + y ** 2), 'y_minor': y, 'x_major': x}
+    y2 = y / 2.0                      # 以 2 kpc 为单位，数值稳定
+    return {'R': np.sqrt(x ** 2 + y ** 2), 'y_minor': y, 'x_major': x,
+            'y3': y2 ** 3,
+            'y2t': y2 ** 2}           # 供对照
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--h5', required=True)
     ap.add_argument('--features', nargs='+', default=['H1', 'sfr', 'CO', 'H1_ew', 'Ldust'])
-    ap.add_argument('--spatial', nargs='*', default=['R', 'y_minor', 'x_major'])
+    ap.add_argument('--spatial', nargs='*', default=['x_major', 'y_minor', 'y3'])
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--floor-frac', type=float, default=0.01)
     ap.add_argument('--zero-co-snr', type=float, default=None)

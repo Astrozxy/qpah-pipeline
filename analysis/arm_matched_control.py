@@ -80,7 +80,15 @@ def main():
 
     floors = np.array([max(1e-9, 0.01 * np.median(X[in_tr, j][X[in_tr, j] > 0]))
                        for j in range(X.shape[1])])
-    Z = np.log10(X + floors[None, :]); mu, sd = Z[in_tr].mean(0), Z[in_tr].std(0) + 1e-12
+    Zlog = np.log10(X + floors[None, :])
+    # 空间项：与主模型一致 {x_major, y_minor, y^3}（y/2 为单位的立方）
+    dxc = (ra - 10.6847) * np.cos(np.radians(41.2690)); dyc = dec - 41.2690
+    PA_ = np.radians(37.7); INC_ = np.radians(77.7)
+    xmaj = ( dxc * np.sin(PA_) + dyc * np.cos(PA_)) * 3600.0 / (206265.0 / 744.0)
+    ymin = (-dxc * np.cos(PA_) + dyc * np.sin(PA_)) / np.cos(INC_) * 3600.0 / (206265.0 / 744.0)
+    SP = np.column_stack([xmaj, ymin, (ymin / 2.0) ** 3])
+    Z = np.column_stack([Zlog, SP])
+    mu, sd = Z[in_tr].mean(0), Z[in_tr].std(0) + 1e-12
     Zs = (Z - mu) / sd
     D = np.column_stack([np.ones(len(Z)), Zs])
     w = 1.0 / sig[in_tr] ** 2
