@@ -52,6 +52,8 @@ def main():
     ap.add_argument('--mask-npz', required=True)
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--step', type=float, default=0.5, help='半径匹配的环宽 (kpc)')
+    ap.add_argument('--soft-co-snr', type=float, default=3.0,
+                    help='CO 软阈值 max(CO - t*sigma, 0)，与主模型一致')
     ap.add_argument('--outdir', default='results/armregion/arm_matched')
     args = ap.parse_args()
 
@@ -64,6 +66,11 @@ def main():
     sel &= (d['H1'] >= 0) & (d['H1_ew'] >= 0) & np.isfinite(d['CO_sigma']) & (d['CO_sigma'] > 0)
     ra, dec = d['ra'][sel].astype(float), d['dec'][sel].astype(float)
     X = np.maximum(np.column_stack([d[k][sel] for k in FEATS]).astype(float), 0.0)
+    # CO 软阈值 —— 与主模型口径一致：max(CO - 3*sigma_CO, 0)
+    if 'CO' in FEATS and args.soft_co_snr is not None:
+        jc = FEATS.index('CO')
+        thr = args.soft_co_snr * np.maximum(d['CO_sigma'][sel].astype(float), 1e-30)
+        X[:, jc] = np.maximum(X[:, jc] - thr, 0.0)
     y = d['qpah'][sel].astype(float)
     sig = np.sqrt(d['qpah_err'][sel].astype(float) ** 2 + args.err_floor ** 2)
 

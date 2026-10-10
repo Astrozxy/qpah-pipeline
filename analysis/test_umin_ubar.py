@@ -36,6 +36,8 @@ def main():
     ap.add_argument('--h5', required=True)
     ap.add_argument('--u', required=True, help='umin_ubar_rows.npz')
     ap.add_argument('--err-floor', type=float, default=0.2)
+    ap.add_argument('--soft-co-snr', type=float, default=None,
+                    help='CO 软阈值 max(CO - t*sigma, 0)')
     ap.add_argument('--zero-co-snr', type=float, default=None,
                     help='可选：CO/σ <= 该值时把 CO 置 0')
     args = ap.parse_args()
@@ -65,7 +67,10 @@ def main():
     X = np.maximum(np.column_stack([d[k] for k in BASE]).astype(float), 0)
     y = d['qpah'].astype(float)
     sig = np.sqrt(d['qpah_err'].astype(float) ** 2 + args.err_floor ** 2)
-    if args.zero_co_snr is not None:
+    if args.soft_co_snr is not None:
+        thr = args.soft_co_snr * np.maximum(d['CO_sigma'].astype(float), 1e-30)
+        X[:, 2] = np.maximum(X[:, 2] - thr, 0.0)
+    elif args.zero_co_snr is not None:
         snr = X[:, 2] / np.maximum(d['CO_sigma'].astype(float), 1e-30)
         X[snr <= args.zero_co_snr, 2] = 0.0
 

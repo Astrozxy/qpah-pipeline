@@ -44,7 +44,10 @@ def main():
     ap.add_argument('--spatial', nargs='*', default=['x_major', 'y_minor'])
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--floor-frac', type=float, default=0.01)
-    ap.add_argument('--zero-co-snr', type=float, default=None)
+    ap.add_argument('--soft-co-snr', type=float, default=3.0,
+                    help='CO 软阈值：CO_eff = max(CO - t*sigma_CO, 0)。'
+                         '在 CO=t*sigma 处连续趋近 0，避免硬 cut 的跳变；无自由参数。'
+                         '传 None 关闭（直接用原始 CO）。')
     ap.add_argument('--export', default=None, help='导出目录（scale.json + model.pth）')
     args = ap.parse_args()
 
@@ -65,11 +68,12 @@ def main():
     in_tr = np.isin(sec, tr_s)
 
     nzero_co = 0
-    if args.zero_co_snr is not None and 'CO' in feats:
+    if args.soft_co_snr is not None and 'CO' in feats:
         jc = feats.index('CO')
-        snr = X[:, jc] / np.maximum(d['CO_sigma'].astype(float), 1e-30)
-        m = snr <= args.zero_co_snr
-        nzero_co = int(m.sum()); X[m, jc] = 0.0
+        sg = np.maximum(d['CO_sigma'].astype(float), 1e-30)
+        thr = args.soft_co_snr * sg
+        nzero_co = int((X[:, jc] <= thr).sum())
+        X[:, jc] = np.maximum(X[:, jc] - thr, 0.0)
 
     floors = np.array([max(1e-9, args.floor_frac * np.median(X[in_tr, j][X[in_tr, j] > 0]))
                        for j in range(len(feats))])
@@ -95,8 +99,10 @@ def main():
     print('空间项   %d 个: %s' % (len(spa), ', '.join(spa) if spa else '(无)'))
     print('权重: 1/sigma_eff^2,  sigma_eff = sqrt(qpah_err^2 + %.1f^2)' % args.err_floor)
     if nzero_co:
-        print('CO 处理: CO/sigma <= %.1f 的 %d 个像素取 0（拟合与预测一致）'
-              % (args.zero_co_snr, nzero_co))
+        print('CO 处理: 软阈值 max(CO - %.1f*sigma_CO, 0)（拟合与预测一致）'
+              % args.soft_co_snr)
+        print('         => %d 个像素(%.1f%%)落到 0，其余按超出阈值的部分取值'
+              % (nzero_co, 100.0 * nzero_co / len(X)))
     print()
     print('--- 预处理参数 ---')
     print('  floor_j (对数偏移): ' + '  '.join('%s=%.6g' % (f_, v) for f_, v in zip(feats, floors)))
@@ -150,7 +156,7 @@ def main():
         scale = dict(features=names, floor=floors.tolist(), mean=mu.tolist(), std=sd.tolist(),
                      transform=('log10_offset' if True else ''), n_log=len(feats),
                      spatial=spa, err_floor=args.err_floor,
-                     zero_co_snr=args.zero_co_snr, coef=coef.tolist())
+                     soft_co_snr=args.soft_co_snr, coef=coef.tolist())
         with open(os.path.join(args.export, 'scale.json'), 'w') as f:
             json.dump(scale, f, indent=2)
         print('\nsaved %s/scale.json' % args.export)

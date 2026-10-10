@@ -67,6 +67,12 @@ def main():
                     help='只保留 qpah_err <= 该值的目标像素（默认不切）')
     ap.add_argument('--train-co-snr', type=float, default=None,
                     help='只用 CO/CO_sigma > 该值的像素【拟合】（CO 是当前最差的图）')
+    ap.add_argument('--outline-npz', default=None,
+                    help='可选：npz（含 ra/dec/region）—— 在三个面板上把这个区域的像素'
+                         '用醒目的点标出来，便于确认"讨论的是同一块"')
+    ap.add_argument('--outline-color', default='lime')
+    ap.add_argument('--soft-co-snr', type=float, default=None,
+                    help='CO 软阈值：CO_eff = max(CO - t*sigma_CO, 0)（连续，无自由参数）')
     ap.add_argument('--zero-co-snr', type=float, default=None,
                     help='【预测】时把 CO/CO_sigma <= 该值的像素的 CO 置 0（未探测=无 CO）')
     args = ap.parse_args()
@@ -111,7 +117,12 @@ def main():
     # 未探测（CO/σ <= 阈值）一律取 0：拟合与预测【都】用这个"探测即值、未探测即零"的 CO
     Xp = X.copy()
     nzero = 0
-    if jco is not None and args.zero_co_snr is not None:
+    if jco is not None and args.soft_co_snr is not None:
+        thr = args.soft_co_snr * np.maximum(d['CO_sigma'][sel].astype(float), 1e-30)
+        nzero = int((X[:, jco] <= thr).sum())
+        X[:, jco] = np.maximum(X[:, jco] - thr, 0.0)
+        Xp = X.copy()          # 预测必须用同一个 CO 处理（否则拟合/预测口径不一致）
+    elif jco is not None and args.zero_co_snr is not None:
         zc = snr <= args.zero_co_snr
         nzero = int(zc.sum())
         Xp[zc, jco] = 0.0
@@ -153,8 +164,8 @@ def main():
         print('CO: 拟合只用 %d 个 CO>%.1fsigma 的像素（占训练集 %.1f%%）'
               % (fit_mask.sum(), args.train_co_snr, 100 * fit_mask.sum() / max(1, in_tr.sum())))
     if nzero:
-        print('CO: 预测时 %d 个 CO<=%.1fsigma 的像素被置 0（占全部 %.1f%%）'
-              % (nzero, args.zero_co_snr, 100 * nzero / len(y)))
+        print('CO: 软阈值 %.1f sigma -> %d 个像素(%.1f%%)落到 0'
+              % (args.soft_co_snr, nzero, 100 * nzero / len(y)))
     print('chi2  fit集=%.4f  train扇区=%.4f  test=%.4f  all=%.4f'
           % (np.mean(chi[fit_mask] ** 2), c2_tr, c2_te, c2_all))
     print('pull(all) 中位=%+.4f  std=%.4f  [p16=%+.3f p84=%+.3f]'
@@ -186,10 +197,28 @@ def main():
     if args.with_abs:
         panels.append((r'Absolute error  $\mathrm{pred}-\mathrm{obs}$',
                        resid, 'coolwarm', nrm_a, r'$\mathrm{pred}-\mathrm{obs}$   (%)'))
+    # 可选：叠加区域标记。用 RA/Dec 精确匹配到当前样本的下标
+    ol_ra = ol_dec = None
+    if args.outline_npz:
+        zo = np.load(args.outline_npz)
+        m = zo['region'].astype(bool)
+        from scipy.spatial import cKDTree
+        tt = cKDTree(np.column_stack([ra, dec]))
+        ddo, iio = tt.query(np.column_stack([zo['ra'][m], zo['dec'][m]]), k=1)
+        sel_o = iio[ddo < 1e-7]
+        ol_ra, ol_dec = ra[sel_o], dec[sel_o]
+        print('outline: %s -> 匹配到当前样本 %d / %d 像素'
+              % (args.outline_npz, len(sel_o), m.sum()))
+
     fig, ax = plt.subplots(1, len(panels), figsize=(6.6 * len(panels), 6.6))
     for a, (title, val, cmap, nrm, clab) in zip(ax, panels):
         sc = a.scatter(ra[order], dec[order], s=1.0, c=val[order], cmap=cmap,
                        norm=nrm, rasterized=True, linewidths=0)
+        if ol_ra is not None:
+            a.scatter(ol_ra, ol_dec, s=3.2, facecolors='none',
+                      edgecolors=args.outline_color, linewidths=0.35,
+                      rasterized=True, label='region under study (n=%d)' % len(ol_ra))
+            a.legend(loc='lower left', fontsize=10, framealpha=.85, markerscale=3)
         a.set_title(title, fontsize=15)
         a.set_xlabel('RA (J2000)')
         a.set_aspect('equal'); a.invert_xaxis(); a.grid(True, ls=':', alpha=.35)

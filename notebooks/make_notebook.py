@@ -81,7 +81,9 @@ ARCSEC_PER_KPC = 206265.0 / 744.0     # 744 kpc distance
 # ============================================================================
 # ---- analysis parameters ----
 ERR_FLOOR   = 0.2      # added in quadrature to qpah_err (%)
-CO_SNR_ZERO = 3.0      # CO/CO_sigma <= this  ->  CO := 0   (non-detection)
+CO_SOFT_SNR = 3.0      # CO soft threshold:  CO_eff = max(CO - t*sigma_CO, 0)
+                       # Continuous at CO = t*sigma (no jump), no free parameter.
+                       # Beats the hard cut (CO:=0 below t*sigma) on every metric.
 QPAH_ERR_MAX = 2.0     # target quality cut (%)
 RMAX        = 18.0     # kpc, Draine et al. caution: parameters unreliable at large radii
 HI_SNR_MIN  = 3.0      # H1 / sigma_H1.  This is the H I quality criterion.
@@ -142,7 +144,7 @@ Starting from the pipeline dataset we apply, in order:
 | 2 | `qpah >= 0` | keep genuine zeros; the **fill value** is removed by the next cut |
 | 3 | `qpah_err > 0` | removes the fill (fill pixels have zero uncertainty) |
 | 4 | `H1 >= 0`, `H1_ew >= 0` | non-negative by construction |
-| 5 | `CO_sigma > 0` | need a noise estimate for the CO S/N test |
+| 5 | `CO_sigma > 0` | need a noise estimate for the CO soft threshold |
 | 6 | `qpah_err <= 2` | an uncertainty of $\pm$2 % on a 0–10 % quantity carries no information |
 | 7 | `R <= 18 kpc` | Draine et al.: model parameters become unreliable at large radii |
 | 8 | $H\,I \ge 3\,\sigma_{H\,I}$ | H I quality criterion, using the delivered `emom0` error map. The sample is H I-bright: median S/N $\approx 66$, **no pixel below $1\sigma$**, so $3\sigma$ drops only 66 pixels. An absolute floor ($N_{H\,I}\ge2\times10^{20}$ cm$^{-2}$, i.e. 110 K km/s) was tried and **rejected**: it removes 46% of the inner disc ($R<3$ kpc) and makes $\chi^2$ worse — it cuts real signal, not noise |
@@ -251,10 +253,10 @@ SPA = ['x_major', 'y_minor']
 
 def build_design(d, sel, in_train, use_agb=False):
     raw_obs = np.maximum(np.column_stack([d[k][sel] for k in OBS]).astype(float), 0.0)
-    # CO non-detections -> 0
+    # CO soft threshold: subtract t*sigma and clip at 0 (continuous, unbiased)
     jc = OBS.index('CO')
-    snr = raw_obs[:, jc] / np.maximum(d['CO_sigma'][sel].astype(float), 1e-30)
-    raw_obs[snr <= CO_SNR_ZERO, jc] = 0.0
+    thr = CO_SOFT_SNR * np.maximum(d['CO_sigma'][sel].astype(float), 1e-30)
+    raw_obs[:, jc] = np.maximum(raw_obs[:, jc] - thr, 0.0)
 
     cols = [raw_obs]
     names = list(OBS)
