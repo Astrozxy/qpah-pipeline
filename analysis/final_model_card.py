@@ -44,6 +44,11 @@ def main():
     ap.add_argument('--spatial', nargs='*', default=['x_major', 'y_minor'])
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--floor-frac', type=float, default=0.01)
+    ap.add_argument('--bin-weight', nargs=5, type=float, default=None,
+                    metavar=('LO', 'HI', 'NBINS', 'POW', 'FLOOR'),
+                    help='按 qPAH 分箱做逆频加权：w *= 1/(count_bin + FLOOR)^POW。'
+                         'POW=1 使每个 bin 的总权重相等（完全拉平）；FLOOR 防止稀有箱权重爆炸。'
+                         '例：--bin-weight 0 10 10 1 1000')
     ap.add_argument('--soft-co-snr', type=float, default=3.0,
                     help='CO 软阈值：CO_eff = max(CO - t*sigma_CO, 0)。'
                          '在 CO=t*sigma 处连续趋近 0，避免硬 cut 的跳变；无自由参数。'
@@ -60,6 +65,20 @@ def main():
     X = np.maximum(np.column_stack([d[k] for k in feats]).astype(float), 0.0)
     y = d['qpah'].astype(float)
     sig = np.sqrt(d['qpah_err'].astype(float) ** 2 + args.err_floor ** 2)
+    # ---- 剔除特征中含 NaN/Inf 的行（例如 dust850 覆盖之外）----
+    cosig = d['CO_sigma'].astype(float) if 'CO_sigma' in d else None
+    okm = np.isfinite(ra) & np.isfinite(dec)
+    for j in range(len(feats)):
+        okm &= np.isfinite(X[:, j])
+    if cosig is not None:
+        okm &= np.isfinite(cosig)
+    if not okm.all():
+        print('剔除特征非有限的行: %d -> %d（-%d）' % (n, int(okm.sum()), n - int(okm.sum())))
+        X, y, sig = X[okm], y[okm], sig[okm]
+        ra, dec = ra[okm], dec[okm]
+        if cosig is not None:
+            cosig = cosig[okm]
+        n = int(okm.sum())
 
     np.random.seed(0)
     ang = (np.arctan2(dec - 41.25, ra - 10.75) + 2 * np.pi) % (2 * np.pi)
@@ -70,7 +89,7 @@ def main():
     nzero_co = 0
     if args.soft_co_snr is not None and 'CO' in feats:
         jc = feats.index('CO')
-        sg = np.maximum(d['CO_sigma'].astype(float), 1e-30)
+        sg = np.maximum(cosig, 1e-30)
         thr = args.soft_co_snr * sg
         nzero_co = int((X[:, jc] <= thr).sum())
         X[:, jc] = np.maximum(X[:, jc] - thr, 0.0)
@@ -85,6 +104,20 @@ def main():
     mu, sd = Z[in_tr].mean(0), Z[in_tr].std(0) + 1e-12
     D = np.column_stack([np.ones(n), (Z - mu) / sd])
     w = 1.0 / sig[in_tr] ** 2
+    binw_info = ''
+    if args.bin_weight is not None:
+        lo, hi, nb, pw, fo = args.bin_weight
+        nb = int(nb)
+        edges = np.linspace(lo, hi, nb + 1)
+        bidx = np.clip(np.digitize(y, edges) - 1, 0, nb - 1)
+        cnt = np.bincount(bidx[in_tr], minlength=nb).astype(float)
+        f = 1.0 / (cnt + fo) ** pw
+        w = w * f[bidx[in_tr]]
+        share = cnt * f / np.sum(cnt * f)
+        binw_info = ('逆频加权: bins=[%g,%g]x%d, pow=%g, floor=%g\n'
+                     '          每箱权重占比: %s'
+                     % (lo, hi, nb, pw, fo,
+                        ' '.join('%.1f%%' % (100 * x) for x in share)))
     coef = np.linalg.solve(D[in_tr].T @ (w[:, None] * D[in_tr]), D[in_tr].T @ (w * y[in_tr]))
     pred = D @ coef
     pull = (pred - y) / sig

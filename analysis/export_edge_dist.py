@@ -13,7 +13,8 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from scipy import ndimage
 
-MAPS = [('CO', 'CO'), ('HI', 'H1'), ('HI_ew', 'H1_ew'), ('SFR', 'sfr'), ('dust', 'dust_density')]
+MAPS = [('CO', 'CO'), ('HI', 'H1'), ('HI_ew', 'H1_ew'), ('SFR', 'sfr'),
+        ('dust', 'dust_density'), ('dustc', 'dust850')]
 
 
 def main():

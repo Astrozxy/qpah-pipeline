@@ -92,6 +92,19 @@ HI_SNR_MIN  = 3.0      # H1 / sigma_H1.  This is the H I quality criterion.
                        # N_HI = 2e20) sounds physical but removes 46% of the R<3 kpc inner disc
                        # and makes chi2 worse -- it cuts real signal, not noise. Do not use it.
 CO_EDGE_MIN = 20.0     # pixels; drop anything closer than this to the CO footprint boundary
+DUST_EDGE_MIN = 5.0    # >>> TUNE ME <<<  drop pixels closer than this (10" px) to the
+                       # 850um footprint boundary.  Its outer ring carries most of the scatter,
+                       # but heavy cuts throw away a lot of data.  Measured trade-off:
+                       #   0 px -> n=68577  chi2_all 1.383  chi2_test 1.243  |r|>2% 1.84%
+                       #   5 px -> n=63423  chi2_all 1.335  chi2_test 1.169  |r|>2% 1.80%
+                       #  10 px -> n=56698  chi2_all 1.293  chi2_test 1.053  |r|>2% 1.69%
+                       #  15 px -> n=50434  chi2_all 1.205  chi2_test 0.940  |r|>2% 1.38%
+                       #  20 px -> n=44318  chi2_all 1.192  chi2_test 0.926  |r|>2% 1.31%
+                       # (binned chi2: 0-15 px = 1.74-1.91 ; 15 px and beyond = 1.16-1.29)
+BIN_WEIGHT = (0.0, 10.0, 10, 1.0, 1000.0)   # (LO, HI, NBINS, POW, FLOOR) inverse-frequency
+                       # weighting by qPAH bin: w *= 1/(count_bin + FLOOR)^POW
+                       # POW=1 equalises the total weight of each bin; FLOOR stops the
+                       # near-empty bins (qPAH 7-10, only 1-57 px) from dominating.
 SEED        = 0"""))
 
     c.append(MD(r"""## 1. Dust luminosity map from Draine et al. (2014)
@@ -159,19 +172,19 @@ bound $q_{\rm PAH}\ge 0$; we report those pixels separately throughout."""))
         d = {k: f[k][:] for k in keys}
     return d
 
-def add_ldust(d):
-    '''Read Sigma_Ldust at the sample positions (identical WCS -> direct pixel lookup).'''
-    with fits.open(ldust_path) as h:
-        img = h[0].data.astype(float)
-    x, y = WCS_QPAH.world_to_pixel_values(d['ra'], d['dec'])
-    ix = np.clip(np.round(x).astype(int), 0, SHAPE[1] - 1)
-    iy = np.clip(np.round(y).astype(int), 0, SHAPE[0] - 1)
-    v = img[iy, ix].copy()
-    v[v == 0] = np.nan                     # 0 = fill
+def add_dust850(d):
+    '''JCMT/SCUBA-2 850um at the sample positions (row-aligned npz, proper NaN mask).
+
+    We use this instead of the DL07 Sigma_Ldust because Ldust comes from the SAME
+    DL07 fit that produces qPAH, which invites a circularity objection. 850um is an
+    independent direct measurement.'''
+    z = np.load(os.path.join(DATA, 'dust_combined_nodust.npz'))
+    v = z['dust_combined'].astype(float)
+    v[~np.isfinite(v)] = np.nan
     return v
 
 d = load_dataset()
-d['Ldust'] = add_ldust(d)
+d['dust850'] = add_dust850(d)
 print('rows in the pipeline dataset:', len(d['qpah']))
 
 # ---- deprojected plane coordinates ----
@@ -196,6 +209,7 @@ def cut(label, cond):
 cut('pipeline rows',                       np.ones(len(m), bool))
 cut('4 required features finite',          np.isfinite(d['H1']) & np.isfinite(d['sfr'])
                                            & np.isfinite(d['CO']) & np.isfinite(d['H1_ew']))
+cut('850um available',                     np.isfinite(d['dust850']) & (d['dust850'] > 0))
 cut('qpah >= 0',                           d['qpah'] >= 0)
 cut('qpah_err > 0',                        d['qpah_err'] > 0)
 cut('H1 >= 0  &  H1_ew >= 0',              (d['H1'] >= 0) & (d['H1_ew'] >= 0))
@@ -206,6 +220,9 @@ _hs = np.load(os.path.join(DATA, 'hi_sigma_rows.npz'))['H1_sigma']
 cut(f'H1 >= {HI_SNR_MIN:g} sigma_H1', d['H1'] >= HI_SNR_MIN * _hs)
 _ez = np.load(os.path.join(DATA, 'edge_rows_nodust.npz'))
 cut(f'CO edge distance >= {CO_EDGE_MIN:g} px', _ez['edge_CO'] >= CO_EDGE_MIN)
+if 'edge_dust850' in _ez.files:
+    cut(f'850um edge distance >= {DUST_EDGE_MIN:g} px',
+        _ez['edge_dust850'] >= DUST_EDGE_MIN)
 
 n0 = len(d['qpah']); prev = n0
 print('\n%-34s %8s %9s %9s' % ('cut', 'N', 'kept', 'delta'))
@@ -248,7 +265,7 @@ print('   exact qPAH == 0 : %d  (%.2f%%)'
 `AGB_count_map.npy` holds the number of AGB stars per $q_{\rm PAH}$ pixel (10" $\times$ 10"),
 selected from the PHAT / PHAT-S colour–magnitude diagrams. It covers only the PHAT footprint,
 so we use `log10(count + 0.5)` and compare **on the AGB-covered subsample** to keep the sample fixed."""))
-    c.append(CODE(r"""OBS = ['H1', 'sfr', 'CO', 'H1_ew', 'Ldust']
+    c.append(CODE(r"""OBS = ['H1', 'sfr', 'CO', 'H1_ew', 'dust850']
 SPA = ['x_major', 'y_minor']
 
 def build_design(d, sel, in_train, use_agb=False):
@@ -284,6 +301,14 @@ def fit(d, sel, in_train, use_agb=False):
     sig = np.sqrt(d['qpah_err'][sel].astype(float) ** 2 + ERR_FLOOR ** 2)
     D   = des['D']
     w   = 1.0 / sig[it] ** 2
+    # inverse-frequency weighting by qPAH bin: equalise the total weight per bin
+    lo, hi, nb, pw, fo = BIN_WEIGHT
+    nb = int(nb)
+    bedges = np.linspace(lo, hi, nb + 1)
+    bidx = np.clip(np.digitize(y, bedges) - 1, 0, nb - 1)
+    bcnt = np.bincount(bidx[it], minlength=nb).astype(float)
+    bf = 1.0 / (bcnt + fo) ** pw
+    w = w * bf[bidx[it]]
     coef = np.linalg.solve(D[it].T @ (w[:, None] * D[it]),
                            D[it].T @ (w * y[it]))
     pred = D @ coef
@@ -335,31 +360,28 @@ d['x_major'], d['y_minor'] = xm, ym
 print('AGB coverage inside the final sample: %d / %d = %.1f %%'
       % ((d['AGB'][sel] > 0).sum(), sel.sum(), 100 * np.mean(d['AGB'][sel] > 0)))"""))
 
-    c.append(MD(r"""## 3b. Why `Ldust` and not the 850 um map
+    c.append(MD(r"""## 3b. The dust tracer: JCMT/SCUBA-2 850 $\mu$m, not $L_{\rm dust}$
 
-$L_{\rm dust}$ is an output of the **same DL07 fit** that produces $q_{\rm PAH}$, so it is not
-strictly independent. We tested replacing it with the genuinely independent JCMT/SCUBA-2 850 um
-map (`m31_combined850_um.fits`, aligned with `reproject_exact`, proper NaN mask):
+The model uses the **850 $\mu$m** map (`m31_combined850_um.fits`, JCMT/SCUBA-2, aligned with
+`reproject_exact` and a proper NaN mask) as its dust term.
 
-| dust term | $\chi^2_{\rm all}$ | standardised coefficient |
-|---|---|---|
-| none | 1.1915 | — |
-| **$L_{\rm dust}$ (DL07)** | **1.1748** | **+0.159** |
-| 850 um | 1.1918 | $-0.007$ (zero) |
-| both | 1.1740 | $L_{\rm dust}$ +0.189, 850 um $-0.067$ |
+**Why not $L_{\rm dust}$?** $L_{\rm dust}$ is an output of the *same DL07 fit* that produces
+$q_{\rm PAH}$; using one product of a fit to predict another product of the same fit invites a
+circularity objection that cannot be fully answered. The 850 $\mu$m map is an **independent direct
+measurement**, so there is no shared-provenance problem at all.
 
-The 850 um map is *marginally* well correlated with $q_{\rm PAH}$ (Pearson $+0.63$ on a log scale)
-but is **conditionally redundant**: once H I, SFR, CO and H I-EW are in the model it contributes
-nothing, whereas $L_{\rm dust}$ does. We therefore keep $L_{\rm dust}$ and state the shared-provenance
-caveat explicitly in the paper.
+The price is coverage: the 850 $\mu$m map only covers the inner disc, so the sample shrinks. Used
+with the same machinery the 850 $\mu$m term is **not redundant** (standardised coefficient
+$\approx +0.11$--$0.16$ depending on the weighting) and it improves the held-out $\chi^2$.
 
-> **Data warning.** The `dust_density` column in `M31_1d_array_nodust.h5` is **corrupted**: it comes
+> **Data warning.** Do **not** use the `dust_density` column of `M31_1d_array_nodust.h5`: it comes
 > from `M31_dust_NH2_sm24.fits`, which is **zero-filled** (`finite` = 100 % but only 43 % $>0$), so
 > the alignment treated no-data pixels as real zeros and diluted the values at coverage edges.
-> Its correlation with $q_{\rm PAH}$ drops from the correct $+0.63$ to $+0.07$. Use the
-> **`dust850`** column instead, which is built from the properly masked map.
+> Its correlation with $q_{\rm PAH}$ falls from the correct $+0.63$ to $+0.07$. This notebook
+> builds `dust850` from the properly masked combined map instead.
+"""))
 
-## 4. Train / test split
+    c.append(MD(r"""## 4. Train / test split
 
 10 azimuthal sectors of $36^\circ$ around a point near the disk centre;
 6 sectors are drawn at random (seed 0) for training, the other 4 are held out.

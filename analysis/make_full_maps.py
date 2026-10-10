@@ -67,10 +67,25 @@ def main():
                     help='只保留 qpah_err <= 该值的目标像素（默认不切）')
     ap.add_argument('--train-co-snr', type=float, default=None,
                     help='只用 CO/CO_sigma > 该值的像素【拟合】（CO 是当前最差的图）')
+    ap.add_argument('--extra-panel', default=None,
+                    help='追加一个面板，显示 h5 中的该列（如 dust850 / Ldust / H1），'
+                         '使用与前三格完全相同的坐标与样本')
+    ap.add_argument('--extra-title', default=None)
+    ap.add_argument('--extra-log', action='store_true', help='额外面板用对数色标')
+    ap.add_argument('--extra-unit', default='')
+    ap.add_argument('--mark-sectors', action='store_true',
+                    help='标出训练/测试扇区：画 10 条扇区边界射线，给测试扇区加淡色底纹并逐扇区标注')
+    ap.add_argument('--mark-radius', type=float, default=None,
+                    help='画出该去投影半径(kpc)的椭圆（例如 18）')
+    ap.add_argument('--sector-ra', type=float, default=10.75)
+    ap.add_argument('--sector-dec', type=float, default=41.25)
     ap.add_argument('--outline-npz', default=None,
                     help='可选：npz（含 ra/dec/region）—— 在三个面板上把这个区域的像素'
                          '用醒目的点标出来，便于确认"讨论的是同一块"')
     ap.add_argument('--outline-color', default='lime')
+    ap.add_argument('--bin-weight', nargs=5, type=float, default=None,
+                    metavar=('LO', 'HI', 'NBINS', 'POW', 'FLOOR'),
+                    help='按 qPAH 分箱逆频加权：w *= 1/(count+floor)^pow')
     ap.add_argument('--soft-co-snr', type=float, default=None,
                     help='CO 软阈值：CO_eff = max(CO - t*sigma_CO, 0)（连续，无自由参数）')
     ap.add_argument('--zero-co-snr', type=float, default=None,
@@ -88,6 +103,8 @@ def main():
         sel &= np.isfinite(d[k])
     if 'dust_density' in feats:
         sel &= d['dust_density'] > 0
+    if 'dust850' in feats:
+        sel &= np.isfinite(d['dust850']) & (d['dust850'] > 0)
     if 'H1' in feats:
         sel &= d['H1'] >= 0
     if 'H1_ew' in feats:
@@ -142,6 +159,17 @@ def main():
     mu, sd = Zf[fit_mask].mean(0), Zf[fit_mask].std(0) + 1e-12
     Df = np.column_stack([np.ones(len(Zf)), (Zf - mu) / sd])
     w = 1.0 / sig[fit_mask] ** 2
+    if args.bin_weight is not None:
+        lo, hi, nb, pw, fo = args.bin_weight
+        nb = int(nb)
+        be = np.linspace(lo, hi, nb + 1)
+        bidx = np.clip(np.digitize(y, be) - 1, 0, nb - 1)
+        bc = np.bincount(bidx[fit_mask], minlength=nb).astype(float)
+        bf = 1.0 / (bc + fo) ** pw
+        w = w * bf[bidx[fit_mask]]
+        sh = bc * bf / np.sum(bc * bf)
+        print('逆频加权: bins=[%g,%g]x%d pow=%g floor=%g | 每箱权重占比 %s'
+              % (lo, hi, nb, pw, fo, ' '.join('%.1f%%' % (100 * x) for x in sh)))
     coef = np.linalg.solve(Df[fit_mask].T @ (w[:, None] * Df[fit_mask]),
                            Df[fit_mask].T @ (w * y[fit_mask]))
     pred = np.column_stack([np.ones(len(Zp)), (Zp - mu) / sd]) @ coef
@@ -197,6 +225,19 @@ def main():
     if args.with_abs:
         panels.append((r'Absolute error  $\mathrm{pred}-\mathrm{obs}$',
                        resid, 'coolwarm', nrm_a, r'$\mathrm{pred}-\mathrm{obs}$   (%)'))
+    if args.extra_panel:
+        with h5py.File(args.h5, 'r') as f:
+            ev = f[args.extra_panel][:][sel].astype(float)
+        ev = np.where(np.isfinite(ev) & (ev > 0), ev, np.nan) if args.extra_log else ev
+        g = ev[np.isfinite(ev)]
+        if args.extra_log:
+            from matplotlib.colors import LogNorm
+            nrm_e = LogNorm(vmin=np.percentile(g, 2), vmax=np.percentile(g, 98))
+        else:
+            nrm_e = Normalize(np.percentile(g, 2), np.percentile(g, 98))
+        ti = args.extra_title or args.extra_panel
+        panels.append((ti, ev, 'inferno', nrm_e,
+                       '%s %s' % (args.extra_panel, args.extra_unit)))
     # 可选：叠加区域标记。用 RA/Dec 精确匹配到当前样本的下标
     ol_ra = ol_dec = None
     if args.outline_npz:
@@ -210,8 +251,53 @@ def main():
         print('outline: %s -> 匹配到当前样本 %d / %d 像素'
               % (args.outline_npz, len(sel_o), m.sum()))
 
+    # ---- 预先算好扇区射线与 R=const 椭圆（都在 RA/Dec 平面）----
+    sec_rays, te_fill = [], []
+    if args.mark_sectors:
+        th = np.linspace(0, 2 * np.pi, 11)
+        rmax = 0.95  # 度，恰好覆盖数据 footprint
+        for t in th:
+            sec_rays.append((args.sector_ra + rmax * np.sin(t) / np.cos(np.radians(args.sector_dec)),
+                             args.sector_dec + rmax * np.cos(t)))
+        # 测试扇区（浅色填充多边形：中心 + 两条边界射线到 rmax）
+        for k in range(10):
+            t0, t1 = th[k], th[k + 1]
+            poly_ra = [args.sector_ra,
+                       args.sector_ra + rmax * np.sin(t0) / np.cos(np.radians(args.sector_dec)),
+                       args.sector_ra + rmax * np.sin(t1) / np.cos(np.radians(args.sector_dec))]
+            poly_de = [args.sector_dec, args.sector_dec + rmax * np.cos(t0),
+                       args.sector_dec + rmax * np.cos(t1)]
+            te_fill.append((k, poly_ra, poly_de))
+        # 扇区编号用的方位（外端标注位置）
+        lab_at = [(args.sector_ra + 0.78 * np.sin(0.5 * (th[k] + th[k + 1])) / np.cos(np.radians(args.sector_dec)),
+                   args.sector_dec + 0.78 * np.cos(0.5 * (th[k] + th[k + 1]))) for k in range(10)]
+    rad_curve = None
+    if args.mark_radius:
+        PA_, INC_ = np.radians(37.7), np.radians(77.7)
+        s_deg = (206265.0 / 744.0) / 3600.0        # kpc -> 度
+        phi = np.linspace(0, 2 * np.pi, 721)
+        xr = args.mark_radius * np.cos(phi); yr = args.mark_radius * np.sin(phi)
+        dxr = s_deg * (xr * np.sin(PA_) - yr * np.cos(INC_) * np.cos(PA_))
+        dyr = s_deg * (xr * np.cos(PA_) + yr * np.cos(INC_) * np.sin(PA_))
+        rad_curve = (10.6847 + dxr / np.cos(np.radians(41.2690)), 41.2690 + dyr)
+
     fig, ax = plt.subplots(1, len(panels), figsize=(6.6 * len(panels), 6.6))
     for a, (title, val, cmap, nrm, clab) in zip(ax, panels):
+        if args.mark_sectors:
+            for k, pr, pd in te_fill:
+                if k in set(tr_s.tolist()):
+                    continue                      # 只给【测试】扇区加底纹
+                a.fill(pr, pd, color='0.55', alpha=0.16, zorder=0, lw=0)
+            for (rr, dd_), in zip(sec_rays):
+                a.plot([args.sector_ra, rr], [args.sector_dec, dd_], color='k',
+                       lw=0.7, ls='--', alpha=.55, zorder=1)
+            for k, (lr, ld_) in enumerate(lab_at):
+                is_tr = k in set(tr_s.tolist())
+                a.text(lr, ld_, 'T%d' % k if is_tr else 'V%d' % k, fontsize=9, ha='center',
+                       va='center', zorder=6, color='k' if is_tr else 'crimson',
+                       bbox=dict(fc='white', alpha=.65, ec='none', pad=0.6))
+        if rad_curve is not None:
+            a.plot(rad_curve[0], rad_curve[1], color='lime', lw=1.5, ls='-', zorder=3)
         sc = a.scatter(ra[order], dec[order], s=1.0, c=val[order], cmap=cmap,
                        norm=nrm, rasterized=True, linewidths=0)
         if ol_ra is not None:
@@ -219,12 +305,25 @@ def main():
                       edgecolors=args.outline_color, linewidths=0.35,
                       rasterized=True, label='region under study (n=%d)' % len(ol_ra))
             a.legend(loc='lower left', fontsize=10, framealpha=.85, markerscale=3)
+        if a is ax[0]:
+            hs = []
+            if args.mark_radius:
+                hs.append(plt.Line2D([], [], color='lime', lw=1.5,
+                                     label=r'$R=%.0f$ kpc' % args.mark_radius))
+            if args.mark_sectors:
+                hs.append(plt.Line2D([], [], color='k', lw=1.2, label='T = train sector'))
+                hs.append(plt.Line2D([], [], color='crimson', lw=1.2, label='V = held-out sector'))
+                hs.append(plt.Rectangle((0, 0), 1, 1, fc='0.55', alpha=.25, ec='none',
+                                        label='held-out sectors (shaded)'))
+            if hs:
+                a.legend(handles=hs, loc='lower left', fontsize=10, framealpha=.85)
         a.set_title(title, fontsize=15)
         a.set_xlabel('RA (J2000)')
         a.set_aspect('equal'); a.invert_xaxis(); a.grid(True, ls=':', alpha=.35)
         a.tick_params(direction='in')
-        cb = fig.colorbar(sc, ax=a, fraction=0.046, pad=0.02)
-        cb.set_label(clab, fontsize=12); cb.ax.tick_params(direction='in')
+        if args.mark_sectors or args.mark_radius:
+            a.set_xlim(ra.max() + 0.12, ra.min() - 0.12)
+            a.set_ylim(dec.min() - 0.12, dec.max() + 0.12)
     ax[0].set_ylabel('Dec (J2000)')
 
     txt = ('n = %d  (train %d / test %d)\n'

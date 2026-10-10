@@ -52,6 +52,9 @@ def main():
                          '注意：distance_transform_edt(qpah>0) 量的是"到最近一个 qpah==0 像素"的距离，'
                          '而 qPAH 有效区内有大量空洞（8.3%% 网格），故该条件会顺带把'
                          '内部空洞周围的壳也切掉 —— 不是"只切外边界"。除非明确要这个行为，否则别开。')
+    ap.add_argument('--dust-edge-min', type=float, default=None,
+                    help='剔除到 850um (dust850) footprint 边界小于该像素数的像素。'
+                         '该图外围一圈(0-15px)的 chi2 为 1.74-1.91，15px 以外只有 1.16-1.29')
     ap.add_argument('--co-edge-min', type=float, default=20.0,
                     help='剔除到 CO footprint 边界小于该像素距离的像素（默认 20 px = 200"）。'
                          'CO 是覆盖最贴边的图，其边界处残差显著偏大（同半径内亦然）')
@@ -132,6 +135,9 @@ def main():
             raise SystemExit('edge npz 行数 %d != h5 %d' % (len(ze['edge_CO']), n0))
         m &= (ze['edge_CO'] >= args.co_edge_min)
         steps.append(('CO 边缘距 >= %g px' % args.co_edge_min, m.copy()))
+        if args.dust_edge_min is not None and 'edge_dust850' in ze.files:
+            m &= (ze['edge_dust850'] >= args.dust_edge_min)
+            steps.append(('dust850 边缘距 >= %g px' % args.dust_edge_min, m.copy()))
     sel = m
 
     print('=== 最终口径筛选漏斗 ===')
