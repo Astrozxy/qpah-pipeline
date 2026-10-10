@@ -83,6 +83,7 @@ QPAH_ERR_MAX = 2.0     # target quality cut (%)
 RMAX        = 18.0     # kpc, Draine et al. caution: parameters unreliable at large radii
 HI_MIN      = 110.0    # K km/s; corresponds to N_HI = 2e20 cm^-2 (Sigma_HI = 1.6 Msun/pc^2)
                        # below this the ISM is effectively absent and qPAH is unconstrained
+CO_EDGE_MIN = 20.0     # pixels; drop anything closer than this to the CO footprint boundary
 SEED        = 0"""))
 
     c.append(MD(r"""## 1. Dust luminosity map from Draine et al. (2014)
@@ -139,6 +140,7 @@ Starting from the pipeline dataset we apply, in order:
 | 6 | `qpah_err <= 2` | an uncertainty of $\pm$2 % on a 0–10 % quantity carries no information |
 | 7 | `R <= 18 kpc` | Draine et al.: model parameters become unreliable at large radii |
 | 8 | `H1 >= 110` K km/s, i.e. $N_{H\,I} \ge 2\times10^{20}$ cm$^{-2}$ ($\Sigma_{H\,I}\ge1.6\ M_\odot$ pc$^{-2}$) | below this the ISM is effectively absent, so $q_{\rm PAH}$ is unconstrained and any agreement would be trivial |
+| 9 | distance to the **CO footprint boundary** $\ge 20$ pixels (200") | the CO mosaic is unreliable at its edge: within 20 px the scatter is much larger, **at fixed galactocentric radius** ($\chi^2$ 2.5 vs 1.6 at $R=12$–15 kpc) while the median pull stays $\approx0$ — extra noise, not a bias |
 
 Cut 2 keeps the pile-up of real $q_{\rm PAH}=0$ measurements produced by the DL07
 bound $q_{\rm PAH}\ge 0$; we report those pixels separately throughout."""))
@@ -192,6 +194,8 @@ cut('CO_sigma > 0',                        np.isfinite(d['CO_sigma']) & (d['CO_s
 cut(f'qpah_err <= {QPAH_ERR_MAX}',         d['qpah_err'] <= QPAH_ERR_MAX)
 cut(f'R <= {RMAX} kpc',                    R <= RMAX)
 cut(f'H1 >= {HI_MIN:g} K km/s (N_HI>=2e20)', d['H1'] >= HI_MIN)
+_edge = np.load(os.path.join(DATA, 'edge_rows_nodust.npz'))['edge_CO']
+cut(f'CO edge distance >= {CO_EDGE_MIN:g} px', _edge >= CO_EDGE_MIN)
 
 n0 = len(d['qpah']); prev = n0
 print('\n%-34s %8s %9s %9s' % ('cut', 'N', 'kept', 'delta'))
@@ -212,21 +216,19 @@ print('   exact qPAH == 0 : %d  (%.2f%%)'
 * The two spatial terms enter **linearly** (they are signed).
 
 > **Which spatial terms?** We tested a range of bases with **leave-one-sector-out**
-> cross-validation (every pixel is genuinely held out once):
+> cross-validation (every pixel is genuinely held out once).
 >
-> | basis | held-out $\chi^2$ | vs $\{x,y\}$ |
-> |---|---|---|
-> | none | 1.9419 | — |
-> | $\{x,y\}$ | 1.6935 | — |
-> | $\{x,y,x^2\}$ | 1.7870 | worse |
-> | $\{x,y,y^2\}$ | 1.7151 | worse |
-> | $\{x,y,x^2,y^2,xy\}$ | 2.2075 | much worse |
-> | **$\{x,y,y^3\}$** | **1.6121** | **$-0.081$ ($\sim7\sigma$)** |
+> Adding curvature (quadratic terms, or a cubic $y^3$) appeared to help *before* the CO
+> footprint edge was masked — but once cut 9 is applied the extra terms give essentially
+> nothing ($\chi^2_{\rm LOO}$ 1.2850 vs 1.2821). **The apparent need for a more complex
+> spatial model was the CO edge artefact.** We therefore keep the minimal linear terms
+> $\{x_{\rm maj}, y_{\rm min}\}$.
 >
-> The **symmetric quadratic terms do not generalise**, but the **cubic in the minor axis
-> does** — and $y^3$ is precisely the asymmetric signature of a **warped disk**. With $y^3$
-> in the model the linear $y$ coefficient collapses from $-0.235$ to $-0.026$: the
-> minor-axis dependence is genuinely curved, not linear.
+> (For reference: the standard description of a galactic warp is
+> $z_w = h_{w,0}(R-R_w)^{\alpha_w}\cos(\phi-\phi_w)$ — an $m=1$ azimuthal mode whose
+> amplitude grows with radius. Projected onto a 2-D map that corresponds to the basis
+> $R^n(\cos\phi,\sin\phi)$; the data prefer the *non-growing* $n=0$ term, i.e. a constant
+> lopsidedness rather than a warp. We keep the simplest form.)
 >
 > An earlier version also used $R=\sqrt{x^2+y^2}$; dropping it slightly improves the held-out
 > $\chi^2$, so the minimal set is used.
@@ -237,7 +239,7 @@ print('   exact qPAH == 0 : %d  (%.2f%%)'
 selected from the PHAT / PHAT-S colour–magnitude diagrams. It covers only the PHAT footprint,
 so we use `log10(count + 0.5)` and compare **on the AGB-covered subsample** to keep the sample fixed."""))
     c.append(CODE(r"""OBS = ['H1', 'sfr', 'CO', 'H1_ew', 'Ldust']
-SPA = ['x_major', 'y_minor', 'y3']
+SPA = ['x_major', 'y_minor']
 
 def build_design(d, sel, in_train, use_agb=False):
     raw_obs = np.maximum(np.column_stack([d[k][sel] for k in OBS]).astype(float), 0.0)
@@ -250,9 +252,7 @@ def build_design(d, sel, in_train, use_agb=False):
     names = list(OBS)
     if use_agb:
         cols.append(np.log10(d['AGB'][sel][:, None] + 0.5)); names.append('AGB')
-    # y3 = (y_minor/2)^3 : asymmetric curvature along the minor axis, i.e. the WARP term
-    sp = np.column_stack([d['x_major'][sel], d['y_minor'][sel],
-                          (d['y_minor'][sel] / 2.0) ** 3])
+    sp = np.column_stack([d['x_major'][sel], d['y_minor'][sel]])
     cols.append(sp); names += SPA
     X = np.column_stack(cols)
 

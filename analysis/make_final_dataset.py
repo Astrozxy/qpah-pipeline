@@ -45,6 +45,11 @@ def main():
     ap.add_argument('--draine', default=None, help='extract_draine_maps.py 的输出（与 h5 行对齐）')
     ap.add_argument('--qpah-err-max', type=float, default=2.0)
     ap.add_argument('--rmax', type=float, default=18.0)
+    ap.add_argument('--edge-npz', default=None,
+                    help='export_edge_dist.py 的输出（与输入 h5 行对齐），提供各图 footprint 边缘距')
+    ap.add_argument('--co-edge-min', type=float, default=20.0,
+                    help='剔除到 CO footprint 边界小于该像素距离的像素（默认 20 px = 200"）。'
+                         'CO 是覆盖最贴边的图，其边界处残差显著偏大（同半径内亦然）')
     ap.add_argument('--hi-min', type=float, default=110.0,
                     help='HI mom0 下限 [K km/s]；默认 110 对应 N_HI >= 2e20 cm^-2'
                          '（Sigma_HI >= 1.60 Msun/pc^2）—— 其下视为事实上没有 ISM')
@@ -78,6 +83,12 @@ def main():
     steps.append(('R <= %.0f kpc' % args.rmax, m.copy()))
     m &= (d['H1'] >= args.hi_min)
     steps.append(('H1 >= %g K km/s (N_HI>=2e20)' % args.hi_min, m.copy()))
+    if args.edge_npz:
+        ze = np.load(args.edge_npz)
+        if len(ze['edge_CO']) != n0:
+            raise SystemExit('edge npz 行数 %d != h5 %d' % (len(ze['edge_CO']), n0))
+        m &= (ze['edge_CO'] >= args.co_edge_min)
+        steps.append(('CO 边缘距 >= %g px' % args.co_edge_min, m.copy()))
     sel = m
 
     print('=== 最终口径筛选漏斗 ===')
@@ -109,7 +120,9 @@ def main():
             except Exception: pass
         f.attrs['final_selection'] = ('qpah>=0 & 0<qpah_err<=%g & H1_ew>=0 & CO_sigma>0 '
                                       '& R<=%g kpc & H1>=%g K km/s (N_HI>=2e20 cm^-2)'
-                                      % (args.qpah_err_max, args.rmax, args.hi_min))
+                                      ' & CO_edge>=%g px'
+                                      % (args.qpah_err_max, args.rmax, args.hi_min,
+                                         args.co_edge_min))
     print('written %s (%.1f MB)' % (out, os.path.getsize(out) / 1e6))
 
     # ---- 诊断图 ----

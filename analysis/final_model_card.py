@@ -41,7 +41,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--h5', required=True)
     ap.add_argument('--features', nargs='+', default=['H1', 'sfr', 'CO', 'H1_ew', 'Ldust'])
-    ap.add_argument('--spatial', nargs='*', default=['x_major', 'y_minor', 'y3'])
+    ap.add_argument('--spatial', nargs='*', default=['x_major', 'y_minor'])
     ap.add_argument('--err-floor', type=float, default=0.2)
     ap.add_argument('--floor-frac', type=float, default=0.01)
     ap.add_argument('--zero-co-snr', type=float, default=None)
