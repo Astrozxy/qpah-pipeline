@@ -55,6 +55,12 @@ def main():
     ap.add_argument('--co-edge-min', type=float, default=20.0,
                     help='剔除到 CO footprint 边界小于该像素距离的像素（默认 20 px = 200"）。'
                          'CO 是覆盖最贴边的图，其边界处残差显著偏大（同半径内亦然）')
+    ap.add_argument('--dust850-npz', default=None,
+                    help='align_dust_combined.py 的输出（与输入 h5 行对齐）。'
+                         '提供后写入 dust850 列 —— 这是【正确 NaN 掩膜】的 850um 图。'
+                         '注意：h5 里原有的 dust_density 来自 M31_dust_NH2_sm24.fits，'
+                         '那张图是零填充的（finite=100%% 但只有 43%% >0），对齐时 0 被当真实值，'
+                         '导致该列被系统性稀释 —— 不要再用 dust_density。')
     ap.add_argument('--hi-sigma-npz', default=None,
                     help='align_hi_sigma.py 的输出（与输入 h5 行对齐）：HI mom0 的误差图。'
                          '提供后会写入 H1_sigma 列，并用 --hi-snr-min 做信噪比筛选')
@@ -93,6 +99,18 @@ def main():
     m &= (R <= args.rmax)
     steps.append(('R <= %.0f kpc' % args.rmax, m.copy()))
     h1sig = None
+    dust850 = None
+    if args.dust850_npz:
+        zd8 = np.load(args.dust850_npz)
+        if len(zd8['dust_combined']) != n0:
+            raise SystemExit('dust850 npz 行数 %d != h5 %d' % (len(zd8['dust_combined']), n0))
+        dust850 = zd8['dust_combined'].astype(float)
+        nd = np.isfinite(dust850) & (dust850 > 0)
+        attrs['dust850_source'] = ('m31_combined850_um.fits, aligned with proper NaN mask '
+                                   '(4 arcsec, reproject_exact, cov>0.5)')
+        attrs['dust850_note'] = ('use this, NOT dust_density: M31_dust_NH2_sm24.fits is '
+                                 'zero-filled so dust_density is diluted toward 0 at coverage edges')
+        print('  dust850: 可用 %d / %d (%.1f%%)' % (nd.sum(), n0, 100 * nd.mean()))
     if args.hi_sigma_npz:
         zs = np.load(args.hi_sigma_npz)
         if len(zs['H1_sigma']) != n0:
@@ -142,6 +160,8 @@ def main():
                     f.create_dataset(k, data=z[k][sel])
         if h1sig is not None:
             f.create_dataset('H1_sigma', data=h1sig[sel].astype(np.float32))
+        if dust850 is not None:
+            f.create_dataset('dust850', data=dust850[sel].astype(np.float32))
         for k, v in attrs.items():
             try: f.attrs[k] = v
             except Exception: pass

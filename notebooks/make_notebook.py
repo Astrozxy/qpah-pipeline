@@ -333,7 +333,31 @@ d['x_major'], d['y_minor'] = xm, ym
 print('AGB coverage inside the final sample: %d / %d = %.1f %%'
       % ((d['AGB'][sel] > 0).sum(), sel.sum(), 100 * np.mean(d['AGB'][sel] > 0)))"""))
 
-    c.append(MD(r"""## 4. Train / test split
+    c.append(MD(r"""## 3b. Why `Ldust` and not the 850 um map
+
+$L_{\rm dust}$ is an output of the **same DL07 fit** that produces $q_{\rm PAH}$, so it is not
+strictly independent. We tested replacing it with the genuinely independent JCMT/SCUBA-2 850 um
+map (`m31_combined850_um.fits`, aligned with `reproject_exact`, proper NaN mask):
+
+| dust term | $\chi^2_{\rm all}$ | standardised coefficient |
+|---|---|---|
+| none | 1.1915 | — |
+| **$L_{\rm dust}$ (DL07)** | **1.1748** | **+0.159** |
+| 850 um | 1.1918 | $-0.007$ (zero) |
+| both | 1.1740 | $L_{\rm dust}$ +0.189, 850 um $-0.067$ |
+
+The 850 um map is *marginally* well correlated with $q_{\rm PAH}$ (Pearson $+0.63$ on a log scale)
+but is **conditionally redundant**: once H I, SFR, CO and H I-EW are in the model it contributes
+nothing, whereas $L_{\rm dust}$ does. We therefore keep $L_{\rm dust}$ and state the shared-provenance
+caveat explicitly in the paper.
+
+> **Data warning.** The `dust_density` column in `M31_1d_array_nodust.h5` is **corrupted**: it comes
+> from `M31_dust_NH2_sm24.fits`, which is **zero-filled** (`finite` = 100 % but only 43 % $>0$), so
+> the alignment treated no-data pixels as real zeros and diluted the values at coverage edges.
+> Its correlation with $q_{\rm PAH}$ drops from the correct $+0.63$ to $+0.07$. Use the
+> **`dust850`** column instead, which is built from the properly masked map.
+
+## 4. Train / test split
 
 10 azimuthal sectors of $36^\circ$ around a point near the disk centre;
 6 sectors are drawn at random (seed 0) for training, the other 4 are held out.
