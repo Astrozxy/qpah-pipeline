@@ -55,8 +55,14 @@ def main():
     ap.add_argument('--co-edge-min', type=float, default=20.0,
                     help='剔除到 CO footprint 边界小于该像素距离的像素（默认 20 px = 200"）。'
                          'CO 是覆盖最贴边的图，其边界处残差显著偏大（同半径内亦然）')
-    ap.add_argument('--hi-min', type=float, default=110.0,
-                    help='HI mom0 下限 [K km/s]；默认 110 对应 N_HI >= 2e20 cm^-2'
+    ap.add_argument('--hi-sigma-npz', default=None,
+                    help='align_hi_sigma.py 的输出（与输入 h5 行对齐）：HI mom0 的误差图。'
+                         '提供后会写入 H1_sigma 列，并用 --hi-snr-min 做信噪比筛选')
+    ap.add_argument('--hi-snr-min', type=float, default=3.0,
+                    help='H1/sigma_H1 下限（默认 3）。本样本 HI 中位 S/N≈66，'
+                         '3σ 只切掉 66 个像素；绝对下限（如 110 K km/s）会切掉真实信号')
+    ap.add_argument('--hi-min', type=float, default=None,
+                    help='HI mom0 下限 [K km/s]；默认 20（最小噪声护栏）。注：110 会砍掉 46%% 的 R<3kpc 内环，且 chi2 更差'
                          '（Sigma_HI >= 1.60 Msun/pc^2）—— 其下视为事实上没有 ISM')
     ap.add_argument('--outdir', default='results/final')
     args = ap.parse_args()
@@ -86,8 +92,18 @@ def main():
     steps.append(('qpah_err <= %.1f' % args.qpah_err_max, m.copy()))
     m &= (R <= args.rmax)
     steps.append(('R <= %.0f kpc' % args.rmax, m.copy()))
-    m &= (d['H1'] >= args.hi_min)
-    steps.append(('H1 >= %g K km/s (N_HI>=2e20)' % args.hi_min, m.copy()))
+    h1sig = None
+    if args.hi_sigma_npz:
+        zs = np.load(args.hi_sigma_npz)
+        if len(zs['H1_sigma']) != n0:
+            raise SystemExit('hi-sigma npz 行数 %d != h5 %d' % (len(zs['H1_sigma']), n0))
+        h1sig = zs['H1_sigma'].astype(float)
+        good = np.isfinite(h1sig) & (h1sig > 0)
+        m &= good & (d['H1'] >= args.hi_snr_min * np.where(good, h1sig, np.inf))
+        steps.append(('H1 >= %g sigma_H1' % args.hi_snr_min, m.copy()))
+    if args.hi_min is not None:
+        m &= (d['H1'] >= args.hi_min)
+        steps.append(('H1 >= %g K km/s' % args.hi_min, m.copy()))
     if args.edge_npz:
         ze = np.load(args.edge_npz)
         if args.qpah_edge_min is not None:
@@ -124,14 +140,18 @@ def main():
             for k in DRAINE:
                 if k in z.files:
                     f.create_dataset(k, data=z[k][sel])
+        if h1sig is not None:
+            f.create_dataset('H1_sigma', data=h1sig[sel].astype(np.float32))
         for k, v in attrs.items():
             try: f.attrs[k] = v
             except Exception: pass
-        f.attrs['final_selection'] = ('qpah>=0 & 0<qpah_err<=%g & H1_ew>=0 & CO_sigma>0 '
-                                      '& R<=%g kpc & H1>=%g K km/s (N_HI>=2e20 cm^-2)'
-                                      ' & CO_edge>=%g px'
-                                      % (args.qpah_err_max, args.rmax, args.hi_min,
-                                         args.co_edge_min))
+        _cuts = ['qpah>=0', '0<qpah_err<=%g' % args.qpah_err_max, 'H1_ew>=0', 'CO_sigma>0',
+                 'R<=%g kpc' % args.rmax, 'CO_edge>=%g px' % args.co_edge_min]
+        if h1sig is not None:
+            _cuts.append('H1>=%g sigma_H1' % args.hi_snr_min)
+        if args.hi_min is not None:
+            _cuts.append('H1>=%g K km/s' % args.hi_min)
+        f.attrs['final_selection'] = ' & '.join(_cuts)
     print('written %s (%.1f MB)' % (out, os.path.getsize(out) / 1e6))
 
     # ---- 诊断图 ----

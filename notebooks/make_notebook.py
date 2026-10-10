@@ -84,8 +84,11 @@ ERR_FLOOR   = 0.2      # added in quadrature to qpah_err (%)
 CO_SNR_ZERO = 3.0      # CO/CO_sigma <= this  ->  CO := 0   (non-detection)
 QPAH_ERR_MAX = 2.0     # target quality cut (%)
 RMAX        = 18.0     # kpc, Draine et al. caution: parameters unreliable at large radii
-HI_MIN      = 110.0    # K km/s; corresponds to N_HI = 2e20 cm^-2 (Sigma_HI = 1.6 Msun/pc^2)
-                       # below this the ISM is effectively absent and qPAH is unconstrained
+HI_SNR_MIN  = 3.0      # H1 / sigma_H1.  This is the H I quality criterion.
+                       # The median S/N in this sample is ~66 and NO pixel is below 1 sigma,
+                       # so 3 sigma removes just 66 pixels. An absolute floor (110 K km/s,
+                       # N_HI = 2e20) sounds physical but removes 46% of the R<3 kpc inner disc
+                       # and makes chi2 worse -- it cuts real signal, not noise. Do not use it.
 CO_EDGE_MIN = 20.0     # pixels; drop anything closer than this to the CO footprint boundary
 SEED        = 0"""))
 
@@ -142,7 +145,7 @@ Starting from the pipeline dataset we apply, in order:
 | 5 | `CO_sigma > 0` | need a noise estimate for the CO S/N test |
 | 6 | `qpah_err <= 2` | an uncertainty of $\pm$2 % on a 0–10 % quantity carries no information |
 | 7 | `R <= 18 kpc` | Draine et al.: model parameters become unreliable at large radii |
-| 8 | `H1 >= 110` K km/s, i.e. $N_{H\,I} \ge 2\times10^{20}$ cm$^{-2}$ ($\Sigma_{H\,I}\ge1.6\ M_\odot$ pc$^{-2}$) | below this the ISM is effectively absent, so $q_{\rm PAH}$ is unconstrained and any agreement would be trivial |
+| 8 | $H\,I \ge 3\,\sigma_{H\,I}$ | H I quality criterion, using the delivered `emom0` error map. The sample is H I-bright: median S/N $\approx 66$, **no pixel below $1\sigma$**, so $3\sigma$ drops only 66 pixels. An absolute floor ($N_{H\,I}\ge2\times10^{20}$ cm$^{-2}$, i.e. 110 K km/s) was tried and **rejected**: it removes 46% of the inner disc ($R<3$ kpc) and makes $\chi^2$ worse — it cuts real signal, not noise |
 | 9 | $\ge 5$ px **inside** the $q_{\rm PAH}$ valid region | the $q_{\rm PAH}$ map has a rim, 1–6 px wide, sitting *just outside* the valid region. Those rim pixels are DL07 fit failures and they carry **the entire $q_{\rm PAH}=0$ pile-up** ($\chi^2 = 7.4$, pull $+1.6$) — they are not physical PAH-free regions. The layer 0–5 px *inside* the boundary is also anomalous ($\chi^2=1.55$, pull $+0.54$); beyond 5 px it is normal. **This cut removes the boundary pile-up entirely, so no censored likelihood is needed.** |
 | 10 | distance to the **CO footprint boundary** $\ge 20$ pixels (200") | the CO mosaic is unreliable at its edge: within 20 px the scatter is much larger, **at fixed galactocentric radius** ($\chi^2$ 2.5 vs 1.6 at $R=12$–15 kpc) while the median pull stays $\approx0$ — extra noise, not a bias |
 
@@ -197,7 +200,8 @@ cut('H1 >= 0  &  H1_ew >= 0',              (d['H1'] >= 0) & (d['H1_ew'] >= 0))
 cut('CO_sigma > 0',                        np.isfinite(d['CO_sigma']) & (d['CO_sigma'] > 0))
 cut(f'qpah_err <= {QPAH_ERR_MAX}',         d['qpah_err'] <= QPAH_ERR_MAX)
 cut(f'R <= {RMAX} kpc',                    R <= RMAX)
-cut(f'H1 >= {HI_MIN:g} K km/s (N_HI>=2e20)', d['H1'] >= HI_MIN)
+_hs = np.load(os.path.join(DATA, 'hi_sigma_rows.npz'))['H1_sigma']
+cut(f'H1 >= {HI_SNR_MIN:g} sigma_H1', d['H1'] >= HI_SNR_MIN * _hs)
 _ez = np.load(os.path.join(DATA, 'edge_rows_nodust.npz'))
 cut(f'CO edge distance >= {CO_EDGE_MIN:g} px', _ez['edge_CO'] >= CO_EDGE_MIN)
 
