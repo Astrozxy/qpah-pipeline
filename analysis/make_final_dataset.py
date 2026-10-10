@@ -47,6 +47,10 @@ def main():
     ap.add_argument('--rmax', type=float, default=18.0)
     ap.add_argument('--edge-npz', default=None,
                     help='export_edge_dist.py 的输出（与输入 h5 行对齐），提供各图 footprint 边缘距')
+    ap.add_argument('--qpah-edge-min', type=float, default=5.0,
+                    help='要求像素在 qPAH 图【有效区内】且到边界至少该像素数。'
+                         '边界 5px 内残差显著偏大且有系统性高估；qpah==0 的"下界堆积"'
+                         '其实是有效区【外】1-6px 的一圈薄边，属拟合失败产物')
     ap.add_argument('--co-edge-min', type=float, default=20.0,
                     help='剔除到 CO footprint 边界小于该像素距离的像素（默认 20 px = 200"）。'
                          'CO 是覆盖最贴边的图，其边界处残差显著偏大（同半径内亦然）')
@@ -85,6 +89,9 @@ def main():
     steps.append(('H1 >= %g K km/s (N_HI>=2e20)' % args.hi_min, m.copy()))
     if args.edge_npz:
         ze = np.load(args.edge_npz)
+        key = 'edge_qpah_signed' if 'edge_qpah_signed' in ze.files else 'edge_qpah'
+        m &= (ze[key] >= args.qpah_edge_min)
+        steps.append(('qPAH 边缘距 >= %g px' % args.qpah_edge_min, m.copy()))
         if len(ze['edge_CO']) != n0:
             raise SystemExit('edge npz 行数 %d != h5 %d' % (len(ze['edge_CO']), n0))
         m &= (ze['edge_CO'] >= args.co_edge_min)

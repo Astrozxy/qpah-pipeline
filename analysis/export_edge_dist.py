@@ -36,10 +36,20 @@ def main():
     ix = np.clip(np.round(x).astype(int), 0, shape[1] - 1)
     iy = np.clip(np.round(y).astype(int), 0, shape[0] - 1)
 
-    # qPAH 图自身
-    qed = ndimage.distance_transform_edt(qph > 0)
-    out = {'edge_qpah': qed[iy, ix].astype(np.float32),
-           'cov_qpah': (qph[iy, ix] > 0).astype(np.float32)}
+    # qPAH 图自身：用【有符号】距离
+    #   >0 = 在 qPAH 有效区内，值为到边界的像素距离
+    #   <0 = 在有效区【外】，值为到最近有效像素的距离
+    # （注意：distance_transform_edt(mask) 对掩膜外像素返回 0，不能直接用）
+    inside = qph > 0
+    d_in = ndimage.distance_transform_edt(inside)
+    d_out = ndimage.distance_transform_edt(~inside)
+    qsd = np.where(inside, d_in, -d_out)
+    out = {'edge_qpah_signed': qsd[iy, ix].astype(np.float32),
+           'edge_qpah': d_in[iy, ix].astype(np.float32),
+           'cov_qpah': inside[iy, ix].astype(np.float32)}
+    v = out['edge_qpah_signed']
+    print('  %-12s 有符号边缘距: 中位=%+6.1f | 在有效区外(<=0) 占 %5.2f%% | 0-5px 占 %5.2f%%'
+          % ('qPAH', np.median(v), 100 * np.mean(v <= 0), 100 * np.mean((v > 0) & (v <= 5))))
     print('样本 %d 行' % len(ra))
     for k, lab in MAPS:
         cp = os.path.join(args.cache, k + '_ex_cov.npy')

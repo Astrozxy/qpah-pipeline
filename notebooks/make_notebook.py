@@ -84,6 +84,8 @@ RMAX        = 18.0     # kpc, Draine et al. caution: parameters unreliable at la
 HI_MIN      = 110.0    # K km/s; corresponds to N_HI = 2e20 cm^-2 (Sigma_HI = 1.6 Msun/pc^2)
                        # below this the ISM is effectively absent and qPAH is unconstrained
 CO_EDGE_MIN = 20.0     # pixels; drop anything closer than this to the CO footprint boundary
+QPAH_EDGE_MIN = 5.0    # pixels; require being INSIDE the qPAH valid region, >=5 px from its edge
+                       # (the rim just outside is a DL07 fit failure, not a real qPAH=0 measurement)
 SEED        = 0"""))
 
     c.append(MD(r"""## 1. Dust luminosity map from Draine et al. (2014)
@@ -140,7 +142,8 @@ Starting from the pipeline dataset we apply, in order:
 | 6 | `qpah_err <= 2` | an uncertainty of $\pm$2 % on a 0–10 % quantity carries no information |
 | 7 | `R <= 18 kpc` | Draine et al.: model parameters become unreliable at large radii |
 | 8 | `H1 >= 110` K km/s, i.e. $N_{H\,I} \ge 2\times10^{20}$ cm$^{-2}$ ($\Sigma_{H\,I}\ge1.6\ M_\odot$ pc$^{-2}$) | below this the ISM is effectively absent, so $q_{\rm PAH}$ is unconstrained and any agreement would be trivial |
-| 9 | distance to the **CO footprint boundary** $\ge 20$ pixels (200") | the CO mosaic is unreliable at its edge: within 20 px the scatter is much larger, **at fixed galactocentric radius** ($\chi^2$ 2.5 vs 1.6 at $R=12$–15 kpc) while the median pull stays $\approx0$ — extra noise, not a bias |
+| 9 | $\ge 5$ px **inside** the $q_{\rm PAH}$ valid region | the $q_{\rm PAH}$ map has a rim, 1–6 px wide, sitting *just outside* the valid region. Those rim pixels are DL07 fit failures and they carry **the entire $q_{\rm PAH}=0$ pile-up** ($\chi^2 = 7.4$, pull $+1.6$) — they are not physical PAH-free regions. The layer 0–5 px *inside* the boundary is also anomalous ($\chi^2=1.55$, pull $+0.54$); beyond 5 px it is normal. **This cut removes the boundary pile-up entirely, so no censored likelihood is needed.** |
+| 10 | distance to the **CO footprint boundary** $\ge 20$ pixels (200") | the CO mosaic is unreliable at its edge: within 20 px the scatter is much larger, **at fixed galactocentric radius** ($\chi^2$ 2.5 vs 1.6 at $R=12$–15 kpc) while the median pull stays $\approx0$ — extra noise, not a bias |
 
 Cut 2 keeps the pile-up of real $q_{\rm PAH}=0$ measurements produced by the DL07
 bound $q_{\rm PAH}\ge 0$; we report those pixels separately throughout."""))
@@ -194,8 +197,10 @@ cut('CO_sigma > 0',                        np.isfinite(d['CO_sigma']) & (d['CO_s
 cut(f'qpah_err <= {QPAH_ERR_MAX}',         d['qpah_err'] <= QPAH_ERR_MAX)
 cut(f'R <= {RMAX} kpc',                    R <= RMAX)
 cut(f'H1 >= {HI_MIN:g} K km/s (N_HI>=2e20)', d['H1'] >= HI_MIN)
-_edge = np.load(os.path.join(DATA, 'edge_rows_nodust.npz'))['edge_CO']
-cut(f'CO edge distance >= {CO_EDGE_MIN:g} px', _edge >= CO_EDGE_MIN)
+_ez = np.load(os.path.join(DATA, 'edge_rows_nodust.npz'))
+_key = 'edge_qpah_signed' if 'edge_qpah_signed' in _ez.files else 'edge_qpah'
+cut(f'qPAH edge distance >= {QPAH_EDGE_MIN:g} px', _ez[_key] >= QPAH_EDGE_MIN)
+cut(f'CO edge distance >= {CO_EDGE_MIN:g} px', _ez['edge_CO'] >= CO_EDGE_MIN)
 
 n0 = len(d['qpah']); prev = n0
 print('\n%-34s %8s %9s %9s' % ('cut', 'N', 'kept', 'delta'))
@@ -508,12 +513,11 @@ plt.show()"""))
 
 ### Two caveats to state in the paper
 
-1. **The exact zeros.** About 2.8 % of the pixels have $q_{\rm PAH}$ exactly 0 because the DL07
-   fit is bounded at $q_{\rm PAH}\ge 0$. These pixels pile up at the boundary and are **not
-   separable** in this feature space (87 % of pixels with the same features have $q_{\rm PAH}>0$;
-   even a non-parametric $k$-NN regressor cannot reach zero for them). They should be reported
-   separately, together with a one-sided (Tobit) likelihood cross-check, and not mixed into a
-   symmetric $\chi^2$.
+1. **The exact zeros are an edge artefact, not a physical pile-up.** Before cut 9, ~1.5 % of the
+   pixels had $q_{\rm PAH}$ exactly 0. They all sit in a 1–6 px rim *just outside* the valid
+   region of the $q_{\rm PAH}$ map — i.e. where the DL07 SED fit runs out of data and piles up
+   against its $q_{\rm PAH}\ge0$ bound. Cut 9 removes them entirely. **No censored (Tobit)
+   likelihood is therefore required**, contrary to what an earlier version of this analysis assumed.
 2. **Angular resolution.** The $q_{\rm PAH}$ map is at **24.9" FWHM (SPIRE 350)** sampled on a
    10" grid, i.e. ~7$\times$ oversampled. The number of *independent* samples is therefore
    $\approx$ (number of pixels)/7.02, which must be used when quoting uncertainties."""))
