@@ -103,6 +103,7 @@ def main():
     steps.append(('R <= %.0f kpc' % args.rmax, m.copy()))
     h1sig = None
     dust850 = None
+    ze = None
     if args.dust850_npz:
         zd8 = np.load(args.dust850_npz)
         if len(zd8['dust_combined']) != n0:
@@ -168,6 +169,10 @@ def main():
             f.create_dataset('H1_sigma', data=h1sig[sel].astype(np.float32))
         if dust850 is not None:
             f.create_dataset('dust850', data=dust850[sel].astype(np.float32))
+        if ze is not None:
+            for _k in ('edge_dust850', 'edge_CO', 'edge_qpah_signed'):
+                if _k in ze.files:
+                    f.create_dataset(_k, data=ze[_k][sel].astype(np.float32))
         for k, v in attrs.items():
             try: f.attrs[k] = v
             except Exception: pass

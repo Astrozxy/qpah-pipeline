@@ -83,6 +83,8 @@ def main():
                     help='可选：npz（含 ra/dec/region）—— 在三个面板上把这个区域的像素'
                          '用醒目的点标出来，便于确认"讨论的是同一块"')
     ap.add_argument('--outline-color', default='lime')
+    ap.add_argument('--dust-edge-min', type=float, default=None,
+                    help='剔除到 850um footprint 边界小于该像素数（读 h5 的 edge_dust850 列）')
     ap.add_argument('--bin-weight', nargs=5, type=float, default=None,
                     metavar=('LO', 'HI', 'NBINS', 'POW', 'FLOOR'),
                     help='按 qPAH 分箱逆频加权：w *= 1/(count+floor)^pow')
@@ -94,7 +96,7 @@ def main():
     feats, spa = args.features, list(args.spatial)
 
     with h5py.File(args.h5, 'r') as f:
-        keys = ['ra', 'dec', 'qpah', 'qpah_err', 'CO_sigma'] + feats
+        keys = ['ra', 'dec', 'qpah', 'qpah_err', 'CO_sigma', 'edge_dust850'] + feats
         d = {k: f[k][:] for k in dict.fromkeys(keys) if k in f}
     sel = (d['qpah'] >= 0) & (d['qpah_err'] > 0)
     if args.qpah_err_max is not None:
@@ -105,6 +107,8 @@ def main():
         sel &= d['dust_density'] > 0
     if 'dust850' in feats:
         sel &= np.isfinite(d['dust850']) & (d['dust850'] > 0)
+    if args.dust_edge_min is not None and 'edge_dust850' in d:
+        sel &= d['edge_dust850'] >= args.dust_edge_min
     if 'H1' in feats:
         sel &= d['H1'] >= 0
     if 'H1_ew' in feats:
