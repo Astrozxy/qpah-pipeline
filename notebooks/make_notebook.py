@@ -76,6 +76,9 @@ PA        = np.radians(37.7)          # position angle of the major axis,
                                       # measured from North through East
 ARCSEC_PER_KPC = 206265.0 / 744.0     # 744 kpc distance
 
+# ============================================================================
+#  TUNE HERE —— 所有数据筛选门槛都集中在这一块，方便手动调节
+# ============================================================================
 # ---- analysis parameters ----
 ERR_FLOOR   = 0.2      # added in quadrature to qpah_err (%)
 CO_SNR_ZERO = 3.0      # CO/CO_sigma <= this  ->  CO := 0   (non-detection)
@@ -84,8 +87,6 @@ RMAX        = 18.0     # kpc, Draine et al. caution: parameters unreliable at la
 HI_MIN      = 110.0    # K km/s; corresponds to N_HI = 2e20 cm^-2 (Sigma_HI = 1.6 Msun/pc^2)
                        # below this the ISM is effectively absent and qPAH is unconstrained
 CO_EDGE_MIN = 20.0     # pixels; drop anything closer than this to the CO footprint boundary
-QPAH_EDGE_MIN = 5.0    # pixels; require being INSIDE the qPAH valid region, >=5 px from its edge
-                       # (the rim just outside is a DL07 fit failure, not a real qPAH=0 measurement)
 SEED        = 0"""))
 
     c.append(MD(r"""## 1. Dust luminosity map from Draine et al. (2014)
@@ -198,8 +199,6 @@ cut(f'qpah_err <= {QPAH_ERR_MAX}',         d['qpah_err'] <= QPAH_ERR_MAX)
 cut(f'R <= {RMAX} kpc',                    R <= RMAX)
 cut(f'H1 >= {HI_MIN:g} K km/s (N_HI>=2e20)', d['H1'] >= HI_MIN)
 _ez = np.load(os.path.join(DATA, 'edge_rows_nodust.npz'))
-_key = 'edge_qpah_signed' if 'edge_qpah_signed' in _ez.files else 'edge_qpah'
-cut(f'qPAH edge distance >= {QPAH_EDGE_MIN:g} px', _ez[_key] >= QPAH_EDGE_MIN)
 cut(f'CO edge distance >= {CO_EDGE_MIN:g} px', _ez['edge_CO'] >= CO_EDGE_MIN)
 
 n0 = len(d['qpah']); prev = n0
@@ -513,11 +512,16 @@ plt.show()"""))
 
 ### Two caveats to state in the paper
 
-1. **The exact zeros are an edge artefact, not a physical pile-up.** Before cut 9, ~1.5 % of the
-   pixels had $q_{\rm PAH}$ exactly 0. They all sit in a 1–6 px rim *just outside* the valid
-   region of the $q_{\rm PAH}$ map — i.e. where the DL07 SED fit runs out of data and piles up
-   against its $q_{\rm PAH}\ge0$ bound. Cut 9 removes them entirely. **No censored (Tobit)
-   likelihood is therefore required**, contrary to what an earlier version of this analysis assumed.
+1. **The exact zeros.** About 1.5 % of the pixels have $q_{\rm PAH}$ exactly 0 because the DL07
+   fit is bounded at $q_{\rm PAH}\ge 0$. They sit in a thin rim just outside the valid region of
+   the $q_{\rm PAH}$ map, i.e. where the SED fit runs out of data. They are **not separable**
+   in this feature space ($\chi^2 = 7.4$, pull $+1.6$; even a non-parametric $k$-NN regressor
+   cannot reach zero for them), so they should be reported **separately** and cross-checked with a
+   one-sided (Tobit) likelihood rather than mixed into a symmetric $\chi^2$.
+   **A cut based on the distance to the $q_{\rm PAH}$ map boundary is deliberately NOT applied**
+   here: that metric measures the distance to the nearest $q_{\rm PAH}=0$ pixel and the valid
+   region is riddled with internal holes (8.3 % of the grid), so such a cut silently removes
+   valid pixels around every hole rather than trimming the outer edge.
 2. **Angular resolution.** The $q_{\rm PAH}$ map is at **24.9" FWHM (SPIRE 350)** sampled on a
    10" grid, i.e. ~7$\times$ oversampled. The number of *independent* samples is therefore
    $\approx$ (number of pixels)/7.02, which must be used when quoting uncertainties."""))
